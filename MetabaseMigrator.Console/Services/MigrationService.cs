@@ -475,8 +475,8 @@ namespace MetabaseMigrator.Services
                             col = dashCard.Col,
                             size_x = dashCard.SizeX,
                             size_y = dashCard.SizeY,
-                            parameter_mappings = dashCard.ParameterMappings ?? new { },
-                            visualization_settings = dashCard.VisualizationSettings ?? new { }
+                            parameter_mappings = dashCard.ParameterMappings ?? new List<ParameterMapping>{ },
+                            visualization_settings = dashCard.VisualizationSettings ?? []
                         };
 
                         await _targetClient.AddCardToDashboardAsync(newDashboardId.Value, payload);

@@ -72,7 +72,7 @@ namespace MetabaseMigrator
                         
                         System.Console.WriteLine($"\n[{PlatformName(config.SourceUrl)} > {PlatformName(config.TargetUrl)}]");
                         System.Console.WriteLine("Type LS for source and LT for target environment dashboards");
-                        var input = System.Console.ReadLine()?.Trim() ?? string.Empty;
+                        var input = (System.Console.ReadLine() ?? string.Empty).Trim().ToUpperInvariant();
 
 
                         switch (input)

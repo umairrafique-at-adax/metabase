@@ -494,54 +494,129 @@ namespace MetabaseMigrator.Services
             System.Console.WriteLine($"Created dashboard '{sourceDashboard.Name}' (ID {newId})");
             return newId;
         }
-
-        private async Task<Dictionary<int, int>> EnsureTargetTabsAsync(int targetDashboardId, MetabaseDashboard sourceDashboard, int? targetCollectionId)
+        private async Task<Dictionary<int, int>> EnsureTargetTabsAsync(
+            int targetDashboardId,
+            MetabaseDashboard sourceDashboard,
+            int? targetCollectionId)
         {
-            var tabsMetadata = sourceDashboard.Tabs?
-                .Select(t => new
-                {
-                    dashboard_id = targetDashboardId,
-                    name = t.Name ?? "",
-                    position = t.Position
-                })
-                .ToList() ?? [];
-
-            var tabsOnlyPayload = new
-            {
-                name = sourceDashboard.Name,
-                description = sourceDashboard.Description ?? "",
-                collection_id = targetCollectionId,
-                tabs = tabsMetadata
-            };
-            await _targetClient.UpdateDashboardAsync(targetDashboardId, tabsOnlyPayload);
-
+            // 1. Fetch full dashboard JSON
             var targetJson = await _targetClient.GetDashboardAsync(targetDashboardId);
-            var map = new Dictionary<int, int>();
 
+            // 2. Deserialize into a mutable dictionary
+            var dict = JsonSerializer.Deserialize<Dictionary<string, object>>(targetJson.GetRawText())
+                       ?? new Dictionary<string, object>();
+
+            var finalMap = new Dictionary<int, int>();
+            var updatedTabs = new List<object>();
+            int tempCounter = -2;
+
+            // 3. Build tabs payload (reuse IDs if they exist, otherwise assign -2, -4, -6 ...)
             var targetTabs = (targetJson.TryGetProperty("tabs", out var tabsElem) && tabsElem.ValueKind == JsonValueKind.Array)
                 ? tabsElem.EnumerateArray().ToList()
                 : new List<JsonElement>();
 
             foreach (var src in sourceDashboard.Tabs ?? Enumerable.Empty<DashboardTab>())
             {
-                int? mapped = null;
-                var byName = targetTabs.FirstOrDefault(t =>
-                    t.TryGetProperty("name", out var n) && (n.GetString() ?? "") == (src.Name ?? ""));
-                if (byName.ValueKind != JsonValueKind.Undefined && byName.TryGetProperty("id", out var idp) && idp.ValueKind == JsonValueKind.Number)
-                    mapped = idp.GetInt32();
+                var safeName = string.IsNullOrWhiteSpace(src.Name) ? "Untitled Tab" : src.Name;
+
+                var existing = targetTabs.FirstOrDefault(t =>
+                    t.TryGetProperty("name", out var n) && (n.GetString() ?? "") == safeName);
+
+                if (existing.ValueKind != JsonValueKind.Undefined &&
+                    existing.TryGetProperty("id", out var eid) &&
+                    eid.ValueKind == JsonValueKind.Number)
+                {
+                    var tid = eid.GetInt32();
+                    updatedTabs.Add(new { id = tid, name = safeName, position = src.Position });
+                    finalMap[src.Id] = tid;
+                }
                 else
                 {
-                    var byPos = targetTabs.FirstOrDefault(t =>
-                        t.TryGetProperty("position", out var p) && p.ValueKind == JsonValueKind.Number && p.GetInt32() == src.Position);
-                    if (byPos.ValueKind != JsonValueKind.Undefined && byPos.TryGetProperty("id", out var pid) && pid.ValueKind == JsonValueKind.Number)
-                        mapped = pid.GetInt32();
+                    var tempId = tempCounter;
+                    updatedTabs.Add(new { id = tempId, name = safeName, position = src.Position });
+                    finalMap[src.Id] = tempId;
+                    tempCounter -= 2;
                 }
-
-                if (mapped.HasValue)
-                    map[src.Id] = mapped.Value;
             }
-            return map;
+
+            // 4. Overwrite tabs property in dashboard JSON
+            dict["tabs"] = updatedTabs;
+
+            // 5. Push full dashboard back to Metabase
+            await _targetClient.UpdateDashboardAsync(targetDashboardId, dict);
+
+            // 6. Re-fetch dashboard to resolve real IDs
+            targetJson = await _targetClient.GetDashboardAsync(targetDashboardId);
+            targetTabs = (targetJson.TryGetProperty("tabs", out var newTabsElem) && newTabsElem.ValueKind == JsonValueKind.Array)
+                ? newTabsElem.EnumerateArray().ToList()
+                : new List<JsonElement>();
+
+            var resolvedMap = new Dictionary<int, int>();
+            foreach (var src in sourceDashboard.Tabs ?? Enumerable.Empty<DashboardTab>())
+            {
+                var safeName = string.IsNullOrWhiteSpace(src.Name) ? "Untitled Tab" : src.Name;
+                var byName = targetTabs.FirstOrDefault(t =>
+                    t.TryGetProperty("name", out var n) && (n.GetString() ?? "") == safeName);
+
+                if (byName.ValueKind != JsonValueKind.Undefined &&
+                    byName.TryGetProperty("id", out var idp) &&
+                    idp.ValueKind == JsonValueKind.Number)
+                {
+                    resolvedMap[src.Id] = idp.GetInt32();
+                }
+            }
+
+            return resolvedMap;
         }
+
+
+        //private async Task<Dictionary<int, int>> EnsureTargetTabsAsync(int targetDashboardId, MetabaseDashboard sourceDashboard, int? targetCollectionId)
+        //{
+        //    var tabsMetadata = sourceDashboard.Tabs?
+        //        .Select(t => new
+        //        {
+        //            dashboard_id = targetDashboardId,
+        //            name = t.Name ?? "",
+        //            position = t.Position
+        //        })
+        //        .ToList() ?? [];
+
+        //    var tabsOnlyPayload = new
+        //    {
+        //        name = sourceDashboard.Name,
+        //        description = sourceDashboard.Description ?? "",
+        //        collection_id = targetCollectionId,
+        //        tabs = tabsMetadata
+        //    };
+        //    await _targetClient.UpdateDashboardAsync(targetDashboardId, tabsOnlyPayload);
+
+        //    var targetJson = await _targetClient.GetDashboardAsync(targetDashboardId);
+        //    var map = new Dictionary<int, int>();
+
+        //    var targetTabs = (targetJson.TryGetProperty("tabs", out var tabsElem) && tabsElem.ValueKind == JsonValueKind.Array)
+        //        ? tabsElem.EnumerateArray().ToList()
+        //        : new List<JsonElement>();
+
+        //    foreach (var src in sourceDashboard.Tabs ?? Enumerable.Empty<DashboardTab>())
+        //    {
+        //        int? mapped = null;
+        //        var byName = targetTabs.FirstOrDefault(t =>
+        //            t.TryGetProperty("name", out var n) && (n.GetString() ?? "") == (src.Name ?? ""));
+        //        if (byName.ValueKind != JsonValueKind.Undefined && byName.TryGetProperty("id", out var idp) && idp.ValueKind == JsonValueKind.Number)
+        //            mapped = idp.GetInt32();
+        //        else
+        //        {
+        //            var byPos = targetTabs.FirstOrDefault(t =>
+        //                t.TryGetProperty("position", out var p) && p.ValueKind == JsonValueKind.Number && p.GetInt32() == src.Position);
+        //            if (byPos.ValueKind != JsonValueKind.Undefined && byPos.TryGetProperty("id", out var pid) && pid.ValueKind == JsonValueKind.Number)
+        //                mapped = pid.GetInt32();
+        //        }
+
+        //        if (mapped.HasValue)
+        //            map[src.Id] = mapped.Value;
+        //    }
+        //    return map;
+        //}
 
         private object BuildDashboardUpdatePayload(
             MetabaseDashboard sourceDashboard,
@@ -555,7 +630,9 @@ namespace MetabaseMigrator.Services
                 {
                     id = dc.Id > 0 ? (int?)dc.Id : null,
                     card_id = cardMapping[dc.Card.Id],
-                    dashboard_tab_id = (dc.DashboardTabId.HasValue && sourceToTargetTabMap.TryGetValue(dc.DashboardTabId.Value, out var tId)) ? (int?)tId : null,
+                    dashboard_tab_id = (dc.DashboardTabId.HasValue &&
+                                        sourceToTargetTabMap.TryGetValue(dc.DashboardTabId.Value, out var tId))
+                                        ? (int?)tId : null,
                     row = dc.Row,
                     col = dc.Col,
                     size_x = dc.SizeX,
@@ -565,12 +642,22 @@ namespace MetabaseMigrator.Services
                 })
                 .ToList();
 
+            // Use resolved tab IDs instead of null
+            var tabs = (sourceDashboard.Tabs ?? Enumerable.Empty<DashboardTab>())
+                .Select(t => new
+                {
+                    id = sourceToTargetTabMap.TryGetValue(t.Id, out var mappedId) ? mappedId : (int?)null,
+                    name = string.IsNullOrWhiteSpace(t.Name) ? "Untitled Tab" : t.Name,
+                    position = t.Position
+                })
+                .ToList();
+
             return new
             {
                 name = sourceDashboard.Name,
                 description = sourceDashboard.Description ?? "",
                 collection_id = targetCollectionId,
-                tabs = sourceDashboard.Tabs?.Select(t => new { id = (int?)null, name = t.Name, position = t.Position }).ToList(),
+                tabs = tabs,
                 dashcards = flattened,
                 parameters = sourceDashboard.Parameters ?? []
             };

@@ -7,6 +7,7 @@ using MetabaseMigrator.Console.Models;
 using System.Runtime.Intrinsics.Arm;
 using System.Net.Http;
 using System.Text;
+using System.Xml.Linq;
 
 namespace MetabaseMigrator.Services
 {
@@ -312,13 +313,11 @@ namespace MetabaseMigrator.Services
             System.Console.Write("\nAre you sure you want to continue with copy? (Y/N): ");
             var confirm = System.Console.ReadLine();
 
-            return;
-
             if (confirm?.Trim().Equals("Y", StringComparison.OrdinalIgnoreCase) == true)
             {
                 try
                 {
-                    //await PerformCopy(dashboardObject);
+                    await PerformCopy(dashboardObject);
 
                     //System.Console.WriteLine($"\n Copy completed! New dashboard ID: {newId}");
                 }
@@ -375,6 +374,8 @@ namespace MetabaseMigrator.Services
                 {
                     var card = dashCard.Card;
 
+                    var fullCardJson =  await _sourceClient.GetCardAsync(dashCard.Card.Id);
+
                     if (card.Id <= 0) continue; // Skip invalid cards
                     int? cardCollectionId;
                     switch (card.MigrationAction)
@@ -407,24 +408,27 @@ namespace MetabaseMigrator.Services
 
                                 await UpdateCardAsync(card.ExistingTargetCardId.Value, updatePayload);
                                 cardMapping[card.Id] = card.ExistingTargetCardId.Value;
-                                System.Console.WriteLine($"✓ Updated existing card '{card.Name}' (ID: {card.ExistingTargetCardId})");
+                                System.Console.WriteLine($"Updated existing card '{card.Name}' (ID: {card.ExistingTargetCardId})");
                             }
                             break;
 
                         case MigrationActions.New:
                             // Resolve card's specific collection (might be different from dashboard collection)
-                             cardCollectionId = await ResolveCardCollectionAsync(card.CollectionId, sourceToTargetCollectionMap);
+                            cardCollectionId = await ResolveCardCollectionAsync(card.CollectionId, sourceToTargetCollectionMap);
 
                             // Create new card
+
                             var newCardPayload = new
                             {
-                                name = card.Name,
-                                description = card.Description ?? "",
-                                dataset_query = card.DatasetQuery,
-                                display = card.Display,
-                                visualization_settings = card.VisualizationSettings,
+                                name = fullCardJson.GetProperty("name").GetString() ?? "Untitled Card",
+                                display = fullCardJson.GetProperty("display").GetString() ?? "table",
+                                dataset_query = fullCardJson.TryGetProperty("dataset_query", out var dq) ? dq : JsonDocument.Parse("{}").RootElement,
+                                visualization_settings = fullCardJson.TryGetProperty("visualization_settings", out var vs) ? vs : JsonDocument.Parse("{}").RootElement,
+                                description = fullCardJson.TryGetProperty("description", out var desc) && !string.IsNullOrWhiteSpace(desc.GetString())
+                                ? desc.GetString()
+                                : null,
                                 collection_id = cardCollectionId,
-                                type = card.Type,
+                                type = fullCardJson.TryGetProperty("type", out var typeProp) ? typeProp.GetString() : "question"
                             };
 
                             var newCard = await _targetClient.CreateCardAsync(newCardPayload);
@@ -440,57 +444,23 @@ namespace MetabaseMigrator.Services
                     }
                 }
 
-                // 3️⃣ Create or reuse dashboard
-                int? newDashboardId;
 
-                if (await DashboardExistsAsync(dashboard.Name))
-                {
-                    newDashboardId = await GetExistingDashboardIdAsync(dashboard.Name);
-                    System.Console.WriteLine($"Dashboard '{dashboard.Name}' already exists in target (ID: {newDashboardId})");
-                }
-                else
-                {
-                    var dashPayload = new
-                    {
-                        name = dashboard.Name,
-                        description = dashboard.Description ?? "",
-                        collection_id = newCollectionId
-                    };
+                // Ensure dashboard exists or create new
+                var newDashboardId = await EnsureDashboardExistsAsync(dashboard, newCollectionId);
+                if (!newDashboardId.HasValue)
+                    throw new InvalidOperationException("Failed to create/resolve target dashboard.");
 
-                    var newDash = await _targetClient.CreateDashboardAsync(dashPayload);
-                    newDashboardId = newDash.GetProperty("id").GetInt32();
+                //  Ensure tabs exist and get mapping (sourceTabId → targetTabId)
+                var srcToTargetTabMap = await EnsureTargetTabsAsync(newDashboardId.Value, dashboard, newCollectionId);
 
-                    System.Console.WriteLine($"Created dashboard '{dashboard.Name}' (ID: {newDashboardId})");
-                }
+                //  Build final payload including dashcards + tabs
+                var finalPayload = BuildDashboardUpdatePayload(dashboard, newCollectionId, cardMapping, srcToTargetTabMap);
 
-                // Assign cards to dashboard
-                foreach (var dashCard in dashboard.Dashcards ?? new List<DashboardCard>())
-                {
-                    if (cardMapping.TryGetValue(dashCard.Card.Id, out var targetCardId))
-                    {
-                        var payload = new
-                        {
-                            cardId = targetCardId,
-                            row = dashCard.Row,
-                            col = dashCard.Col,
-                            size_x = dashCard.SizeX,
-                            size_y = dashCard.SizeY,
-                            parameter_mappings = dashCard.ParameterMappings ?? new List<ParameterMapping>{ },
-                            visualization_settings = dashCard.VisualizationSettings ?? []
-                        };
-
-                        await _targetClient.AddCardToDashboardAsync(newDashboardId.Value, payload);
-
-                        System.Console.WriteLine($"✓ Added card '{dashCard.Card.Name}' to dashboard {newDashboardId}");
-                    }
-                    else
-                    {
-                        System.Console.WriteLine($"⚠ Skipped card {dashCard.Card.Id} (not migrated)");
-                    }
-                }
+                //  PUT update to dashboard
+                await UpdateDashboardWithPayloadAsync(newDashboardId.Value, finalPayload);
 
                 System.Console.ForegroundColor = ConsoleColor.Green;
-                System.Console.WriteLine($"\n✓ Migration completed! New dashboard ID: {newDashboardId}");
+                System.Console.WriteLine($"\nMigration completed! New dashboard ID: {newDashboardId}");
                 System.Console.ResetColor();
 
                 return newDashboardId;
@@ -501,6 +471,116 @@ namespace MetabaseMigrator.Services
                 return null;
             }
         }
+
+
+        private async Task<int?> EnsureDashboardExistsAsync(MetabaseDashboard sourceDashboard, int? targetCollectionId)
+        {
+            if (await DashboardExistsAsync(sourceDashboard.Name))
+            {
+                var existing = await GetExistingDashboardIdAsync(sourceDashboard.Name);
+                System.Console.WriteLine($"Dashboard '{sourceDashboard.Name}' already exists in target (ID {existing})");
+                return existing;
+            }
+
+            var createPayload = new
+            {
+                name = sourceDashboard.Name,
+                description = sourceDashboard.Description ?? "",
+                collection_id = targetCollectionId
+            };
+
+            var created = await _targetClient.CreateDashboardAsync(createPayload);
+            var newId = created.GetProperty("id").GetInt32();
+            System.Console.WriteLine($"Created dashboard '{sourceDashboard.Name}' (ID {newId})");
+            return newId;
+        }
+
+        private async Task<Dictionary<int, int>> EnsureTargetTabsAsync(int targetDashboardId, MetabaseDashboard sourceDashboard, int? targetCollectionId)
+        {
+            var tabsMetadata = sourceDashboard.Tabs?
+                .Select(t => new
+                {
+                    dashboard_id = targetDashboardId,
+                    name = t.Name ?? "",
+                    position = t.Position
+                })
+                .ToList() ?? [];
+
+            var tabsOnlyPayload = new
+            {
+                name = sourceDashboard.Name,
+                description = sourceDashboard.Description ?? "",
+                collection_id = targetCollectionId,
+                tabs = tabsMetadata
+            };
+            await _targetClient.UpdateDashboardAsync(targetDashboardId, tabsOnlyPayload);
+
+            var targetJson = await _targetClient.GetDashboardAsync(targetDashboardId);
+            var map = new Dictionary<int, int>();
+
+            var targetTabs = (targetJson.TryGetProperty("tabs", out var tabsElem) && tabsElem.ValueKind == JsonValueKind.Array)
+                ? tabsElem.EnumerateArray().ToList()
+                : new List<JsonElement>();
+
+            foreach (var src in sourceDashboard.Tabs ?? Enumerable.Empty<DashboardTab>())
+            {
+                int? mapped = null;
+                var byName = targetTabs.FirstOrDefault(t =>
+                    t.TryGetProperty("name", out var n) && (n.GetString() ?? "") == (src.Name ?? ""));
+                if (byName.ValueKind != JsonValueKind.Undefined && byName.TryGetProperty("id", out var idp) && idp.ValueKind == JsonValueKind.Number)
+                    mapped = idp.GetInt32();
+                else
+                {
+                    var byPos = targetTabs.FirstOrDefault(t =>
+                        t.TryGetProperty("position", out var p) && p.ValueKind == JsonValueKind.Number && p.GetInt32() == src.Position);
+                    if (byPos.ValueKind != JsonValueKind.Undefined && byPos.TryGetProperty("id", out var pid) && pid.ValueKind == JsonValueKind.Number)
+                        mapped = pid.GetInt32();
+                }
+
+                if (mapped.HasValue)
+                    map[src.Id] = mapped.Value;
+            }
+            return map;
+        }
+
+        private object BuildDashboardUpdatePayload(
+            MetabaseDashboard sourceDashboard,
+            int? targetCollectionId,
+            Dictionary<int, int> cardMapping,
+            Dictionary<int, int> sourceToTargetTabMap)
+        {
+            var flattened = (sourceDashboard.Dashcards ?? Enumerable.Empty<DashboardCard>())
+                .Where(dc => dc?.Card != null && cardMapping.ContainsKey(dc.Card.Id))
+                .Select(dc => new
+                {
+                    id = dc.Id > 0 ? (int?)dc.Id : null,
+                    card_id = cardMapping[dc.Card.Id],
+                    dashboard_tab_id = (dc.DashboardTabId.HasValue && sourceToTargetTabMap.TryGetValue(dc.DashboardTabId.Value, out var tId)) ? (int?)tId : null,
+                    row = dc.Row,
+                    col = dc.Col,
+                    size_x = dc.SizeX,
+                    size_y = dc.SizeY,
+                    parameter_mappings = dc.ParameterMappings ?? [],
+                    visualization_settings = dc.VisualizationSettings ?? []
+                })
+                .ToList();
+
+            return new
+            {
+                name = sourceDashboard.Name,
+                description = sourceDashboard.Description ?? "",
+                collection_id = targetCollectionId,
+                tabs = sourceDashboard.Tabs?.Select(t => new { id = (int?)null, name = t.Name, position = t.Position }).ToList(),
+                dashcards = flattened,
+                parameters = sourceDashboard.Parameters ?? []
+            };
+        }
+
+        private async Task<JsonElement> UpdateDashboardWithPayloadAsync(int targetDashboardId, object payload)
+        {
+            return await _targetClient.UpdateDashboardAsync(targetDashboardId, payload);
+        }
+
 
         public async Task<JsonElement> UpdateCardAsync(int cardId, object payload)
         {
@@ -524,7 +604,7 @@ namespace MetabaseMigrator.Services
             // cycle protection
             if (!visited.Add(sourceCollectionId))
             {
-                System.Console.WriteLine($"⚠ Detected cycle while resolving collection {sourceCollectionId}. Aborting this branch.");
+                System.Console.WriteLine($"Detected cycle while resolving collection {sourceCollectionId}. Aborting this branch.");
                 return null;
             }
 
@@ -561,6 +641,11 @@ namespace MetabaseMigrator.Services
                 ? nsProp.GetString() ?? ""
                 : "";
 
+            int? sc_personal_owner_id = sourceCollection.TryGetProperty("personal_owner_id", out var psOwnerIdProp) && psOwnerIdProp.ValueKind == JsonValueKind.Number
+                ? psOwnerIdProp.GetInt32()
+                : (int?)null;
+
+
             int? sourceParentId = null;
             if (sourceCollection.TryGetProperty("parent_id", out var parentProp) && parentProp.ValueKind != JsonValueKind.Null)
             {
@@ -568,7 +653,7 @@ namespace MetabaseMigrator.Services
                     sourceParentId = p;
             }
 
-            // Resolve target parent (recursive) — if source had no parent, put under root (use 1 as default)
+            // Resolve target parent (recursive) — if source had no parent, put under root (use null as default)
             int? targetParentId;
             if (sourceParentId.HasValue)
             {
@@ -586,7 +671,7 @@ namespace MetabaseMigrator.Services
             }
 
             // Try to find an existing collection on target with same name + parent
-            var existingTargetId = await FindTargetCollectionByNameAndParentAsync(name, targetParentId);
+            var existingTargetId = await FindTargetCollectionByNameAndParentAsync(name, targetParentId, sc_personal_owner_id);
             if (existingTargetId.HasValue)
             {
                 sourceToTargetCollectionMap[sourceCollectionId] = existingTargetId.Value;
@@ -595,56 +680,101 @@ namespace MetabaseMigrator.Services
             }
 
             // Not found — create a new collection on target using source's properties
+            //var payload = new
+            //{
+            //    name = name,
+            //    description = description,
+            //    authority_level = null,
+            //    // use @namespace for the anonymous object
+            //    parent_id = targetParentId
+            //};
+
+            var targetCollectionLocation = targetParentId == null ? "/" : "/" + targetParentId + "/";
+
             var payload = new
             {
-                name = name,
-                description = description,
-                authority_level = authority,
-                @namespace = ns,                 // use @namespace for the anonymous object
-                parent_id = targetParentId
+                parent_id = targetParentId,
+                authority_level = (string?)null,
+                description = string.IsNullOrEmpty(description) ? null : description,
+                name = name
             };
+
+
+
+
 
             try
             {
                 var created = await CreateTargetCollectionAsync(payload);
-                var newId = created.GetProperty("id").GetInt32();
+                var newId = GetCollectionId(created);
                 sourceToTargetCollectionMap[sourceCollectionId] = newId;
-                System.Console.WriteLine($"✓ Created collection '{name}' on target (ID: {newId}) with parent {targetParentId}");
+                System.Console.WriteLine($"Created collection '{name}' on target (ID: {newId}) with parent {targetParentId}");
                 return newId;
             }
             catch (Exception ex)
             {
-                System.Console.WriteLine($"❌ Failed to create collection '{name}' on target: {ex}");
+                System.Console.WriteLine($"Failed to create collection '{name}' on target: {ex}");
                 return null;
             }
         }
 
-                private async Task<JsonElement> CreateTargetCollectionAsync(object payload)
+
+        private int GetCollectionId(JsonElement collection)
+        {
+            var idProp = collection.GetProperty("id");
+
+            return idProp.ValueKind switch
+            {
+                JsonValueKind.Number => idProp.GetInt32(),
+                JsonValueKind.String when int.TryParse(idProp.GetString(), out var parsed) => parsed,
+                _ => throw new InvalidOperationException($"Collection ID is not numeric: {idProp}")
+            };
+        }
+
+
+        private async Task<JsonElement> CreateTargetCollectionAsync(object payload)
         {
             var response = await _targetClient.CreateCollectionAsync(payload);
             return response;
         }
 
-        private async Task<int?> FindTargetCollectionByNameAndParentAsync(string name, int? parentId)
+        private async Task<int?> FindTargetCollectionByNameAndParentAsync(string name, int? parentId, int? personalOwnerId)
         {
             try
             {
                 var collections = await _targetClient.GetAsync("/api/collection");
                 var collectionsJson = JsonSerializer.Deserialize<JsonElement>(collections);
 
-                foreach (var collection in collectionsJson.GetProperty("data").EnumerateArray())
+                foreach (var collection in collectionsJson.EnumerateArray())
                 {
                     var collectionName = collection.GetProperty("name").GetString();
-                    var collectionParentId = collection.TryGetProperty("parent_id", out var parentProp) && parentProp.ValueKind != JsonValueKind.Null
-                        ? (int?)parentProp.GetInt32()
-                        : null;
 
-                    if (collectionName?.Equals(name, StringComparison.OrdinalIgnoreCase) == true &&
-                        collectionParentId == parentId)
+                    int? collectionPersonalOwnerId = null;
+                    if (collection.TryGetProperty("personal_owner_id", out var personalOwnerProp) && personalOwnerProp.ValueKind == JsonValueKind.Number)
+                    {
+                        collectionPersonalOwnerId = personalOwnerProp.GetInt32();
+                    }
+
+                    int? collectionParentId = null;
+                    if (collection.TryGetProperty("parent_id", out var parentProp) && parentProp.ValueKind == JsonValueKind.Number)
+                    {
+                        collectionParentId = parentProp.GetInt32();
+                    }
+
+                    // Match rule 1: Name 
+                    if (collectionName?.Equals(name, StringComparison.OrdinalIgnoreCase) == true)
+                    {
+                        return collection.GetProperty("id").GetInt32();
+                    }
+
+                    // Match rule 2: If name is not found then match their personal owner id
+                    if (personalOwnerId.HasValue && collectionPersonalOwnerId.HasValue &&
+                        personalOwnerId.Value == collectionPersonalOwnerId.Value)
                     {
                         return collection.GetProperty("id").GetInt32();
                     }
                 }
+
                 return null;
             }
             catch
@@ -656,6 +786,11 @@ namespace MetabaseMigrator.Services
         private async Task<JsonElement> GetSourceCollectionAsync(int collectionId)
         {
             var response = await _sourceClient.GetAsync($"/api/collection/{collectionId}");
+            return JsonSerializer.Deserialize<JsonElement>(response);
+        }
+        private async Task<JsonElement> CreateCollectionAsync(int collectionId)
+        {
+            var response = await _targetClient.GetAsync($"/api/collection/{collectionId}");
             return JsonSerializer.Deserialize<JsonElement>(response);
         }
 
@@ -1078,7 +1213,7 @@ namespace MetabaseMigrator.Services
                 var collections = await _targetClient.GetAsync("/api/collection");
                 var collectionsJson = JsonSerializer.Deserialize<JsonElement>(collections);
 
-                foreach (var collection in collectionsJson.GetProperty("data").EnumerateArray())
+                foreach (var collection in collectionsJson.EnumerateArray())
                 {
                     var name = collection.GetProperty("name").GetString();
                     if (name?.Equals(collectionName, StringComparison.OrdinalIgnoreCase) == true)
@@ -1106,7 +1241,7 @@ namespace MetabaseMigrator.Services
                 var collections = await _targetClient.GetAsync("/api/collection");
                 var collectionsJson = JsonSerializer.Deserialize<JsonElement>(collections);
 
-                foreach (var collection in collectionsJson.GetProperty("data").EnumerateArray())
+                foreach (var collection in collectionsJson.EnumerateArray())
                 {
                     var name = collection.GetProperty("name").GetString();
                     if (name?.Equals(collectionName, StringComparison.OrdinalIgnoreCase) == true)
@@ -1188,7 +1323,7 @@ namespace MetabaseMigrator.Services
             {
                 var dashboards = await _targetClient.GetDashboardsAsync();
 
-                foreach (var dashboard in dashboards.GetProperty("data").EnumerateArray())
+                foreach (var dashboard in dashboards.EnumerateArray())
                 {
                     var name = dashboard.GetProperty("name").GetString();
                     if (name?.Equals(dashboardName, StringComparison.OrdinalIgnoreCase) == true)
@@ -1215,7 +1350,7 @@ namespace MetabaseMigrator.Services
             {
                 var dashboards = await _targetClient.GetDashboardsAsync();
 
-                foreach (var dashboard in dashboards.GetProperty("data").EnumerateArray())
+                foreach (var dashboard in dashboards.EnumerateArray())
                 {
                     var name = dashboard.GetProperty("name").GetString();
                     if (name?.Equals(dashboardName, StringComparison.OrdinalIgnoreCase) == true)

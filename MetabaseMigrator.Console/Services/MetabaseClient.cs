@@ -4,7 +4,9 @@ using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
+using System.Xml.Linq;
 using MetabaseMigrator.Console.Config;
+using RestSharp;
 
 namespace MetabaseMigrator.Console.Services
 {
@@ -48,6 +50,28 @@ namespace MetabaseMigrator.Console.Services
                 return false;
             }
         }
+
+
+        public async Task<JsonElement> UpdateDashboardAsync(int dashboardId, object payload)
+        {
+            var json = JsonSerializer.Serialize(payload);
+            var responseStr = await PutAsync($"/api/dashboard/{dashboardId}", json);
+
+            if (string.IsNullOrWhiteSpace(responseStr))
+                throw new InvalidOperationException("Dashboard update returned empty response.");
+
+            try
+            {
+                return JsonSerializer.Deserialize<JsonElement>(responseStr);
+            }
+            catch (JsonException ex)
+            {
+                throw new InvalidOperationException(
+                    $"Failed to parse dashboard update response. Raw response:\n{responseStr}", ex);
+            }
+        }
+
+
 
         /// <summary>
         /// Get data from Metabase API
@@ -139,11 +163,21 @@ namespace MetabaseMigrator.Console.Services
         /// <summary>
         /// Create a new collection
         /// </summary>
-        public async Task<JsonElement> CreateCollectionAsync(object collectionData)
+        public async Task<JsonElement> CreateCollectionAsync(object payload)
         {
-            var json = JsonSerializer.Serialize(collectionData);
-            var response = await PostAsync("/api/collection", json);
-            return JsonSerializer.Deserialize<JsonElement>(response);
+
+            var json = JsonSerializer.Serialize(payload);
+            var responseStr = await PostAsync("/api/collection", json);
+
+            var created = JsonSerializer.Deserialize<JsonElement>(responseStr);
+
+            // Optional: sanity check that it's an object and contains an "id"
+            if (created.ValueKind != JsonValueKind.Object || !created.TryGetProperty("id", out _))
+            {
+                throw new InvalidOperationException("Expected single collection object with 'id'.");
+            }
+
+            return created;
         }
 
         /// <summary>
@@ -166,29 +200,84 @@ namespace MetabaseMigrator.Console.Services
             return JsonSerializer.Deserialize<JsonElement>(response);
         }
 
+        //private async Task<string> SendRequestAsync(HttpMethod method, string endpoint, string? jsonContent = null)
+        //{
+        //    if (_apiToken == null)
+        //    {
+        //        throw new InvalidOperationException("Not authenticated. Please check config.");
+        //    }
+
+
+        //    //var client = new RestClient(_baseUrl);
+        //    //var req = new RestRequest("/api/collection", Method.Post);
+
+        //    //// Headers
+        //    //req.AddHeader("x-api-key", _apiToken);
+
+        //    //// JSON body
+        //    //req.AddJsonBody(new
+        //    //{
+        //    //    parent_id = 6,
+        //    //    authority_level = null,
+        //    //    color = "#509EE3",
+        //    //    description = null,
+        //    //    name = "TestingCollection"
+        //    //});
+
+        //    //var resp = await client.ExecuteAsync(req);
+
+
+        //    var url = $"{_baseUrl}{endpoint}";
+        //    _logger.LogDebug($"{method} {url}");
+
+        //    var request = new HttpRequestMessage(method, url);
+
+        //    if (_apiToken != null)
+        //    {
+        //        request.Headers.Add("x-api-key", _apiToken);
+        //    }
+
+        //    if (jsonContent != null)
+        //    {
+        //        request.Content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
+        //    }
+
+
+        //    var response = await _httpClient.SendAsync(request);
+        //    var responseContent = await response.Content.ReadAsStringAsync();
+
+        //    if (!response.IsSuccessStatusCode)
+        //    {
+        //        _logger.LogError($"HTTP {response.StatusCode}: {responseContent}");
+        //        throw new HttpRequestException($"Request failed: {response.StatusCode} - {responseContent}");
+        //    }
+
+        //    _logger.LogDebug($"Response: {responseContent.Substring(0, Math.Min(200, responseContent.Length))}...");
+        //    return responseContent;
+        //}
+
         private async Task<string> SendRequestAsync(HttpMethod method, string endpoint, string? jsonContent = null)
         {
-            if (_apiToken == null)
-            {
+            if (string.IsNullOrWhiteSpace(_apiToken))
                 throw new InvalidOperationException("Not authenticated. Please check config.");
-            }
 
             var url = $"{_baseUrl}{endpoint}";
             _logger.LogDebug($"{method} {url}");
 
-            var request = new HttpRequestMessage(method, url);
-
-            if (_apiToken != null)
+            using var request = new HttpRequestMessage
             {
-                request.Headers.Add("x-api-key", _apiToken);
-            }
+                Method = method,
+                RequestUri = new Uri(url)
+            };
 
-            if (jsonContent != null)
+            request.Headers.Add("x-api-key", _apiToken);
+
+            if (!string.IsNullOrEmpty(jsonContent))
             {
                 request.Content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
             }
 
-            var response = await _httpClient.SendAsync(request);
+            using var response = await _httpClient.SendAsync(request);
             var responseContent = await response.Content.ReadAsStringAsync();
 
             if (!response.IsSuccessStatusCode)
@@ -200,6 +289,7 @@ namespace MetabaseMigrator.Console.Services
             _logger.LogDebug($"Response: {responseContent.Substring(0, Math.Min(200, responseContent.Length))}...");
             return responseContent;
         }
+
 
         /// <summary>
         /// Test connection to Metabase instance

@@ -80,6 +80,9 @@ namespace MetabaseMigrator
                             case "HELP":
                                 PrintHelp();
                                 break;
+                            case "TESTCON":
+                                await TestConnections(config, logger);
+                                break;
 
                             case "LS":
                                 await mgService.ListSourceDashboardAsync();

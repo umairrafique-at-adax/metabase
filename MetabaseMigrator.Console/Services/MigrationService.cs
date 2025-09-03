@@ -8,6 +8,7 @@ using System.Runtime.Intrinsics.Arm;
 using System.Net.Http;
 using System.Text;
 using System.Xml.Linq;
+using Newtonsoft.Json.Linq;
 
 namespace MetabaseMigrator.Services
 {
@@ -189,6 +190,8 @@ namespace MetabaseMigrator.Services
             {
                 var dashboard = await FindDashboardAsync(dashboardId);
                 dashboardObject = Newtonsoft.Json.JsonConvert.DeserializeObject<MetabaseDashboard>(dashboard?.ToString() ?? "");
+                
+               
 
                 if (dashboardObject == null)
                 {
@@ -374,7 +377,7 @@ namespace MetabaseMigrator.Services
                 {
                     var card = dashCard.Card;
 
-                    var fullCardJson =  await _sourceClient.GetCardAsync(dashCard.Card.Id);
+                    var fullCardJson = await _sourceClient.GetCardAsync(dashCard.Card.Id);
 
                     if (card.Id <= 0) continue; // Skip invalid cards
                     int? cardCollectionId;
@@ -618,12 +621,14 @@ namespace MetabaseMigrator.Services
         //    return map;
         //}
 
+
         private object BuildDashboardUpdatePayload(
             MetabaseDashboard sourceDashboard,
             int? targetCollectionId,
             Dictionary<int, int> cardMapping,
             Dictionary<int, int> sourceToTargetTabMap)
         {
+            // ✅ Flatten dashcards with mapped card + tab IDs
             var flattened = (sourceDashboard.Dashcards ?? Enumerable.Empty<DashboardCard>())
                 .Where(dc => dc?.Card != null && cardMapping.ContainsKey(dc.Card.Id))
                 .Select(dc => new
@@ -637,12 +642,21 @@ namespace MetabaseMigrator.Services
                     col = dc.Col,
                     size_x = dc.SizeX,
                     size_y = dc.SizeY,
-                    parameter_mappings = dc.ParameterMappings ?? [],
-                    visualization_settings = dc.VisualizationSettings ?? []
+                    // ✅ filter only valid parameter mappings
+                    parameter_mappings = (dc.ParameterMappings ?? new List<ParameterMapping>())
+                        .Where(pm => !string.IsNullOrWhiteSpace(pm.ParameterId) && pm.Target != null)
+                        .Select(pm => new
+                        {
+                            parameter_id = pm.ParameterId,
+                            target = pm.Target
+                        })
+                        .ToList(),
+                    visualization_settings = dc.VisualizationSettings ?? new Dictionary<string, object>()
                 })
                 .ToList();
 
-            // Use resolved tab IDs instead of null
+
+            // ✅ Tabs with resolved IDs
             var tabs = (sourceDashboard.Tabs ?? Enumerable.Empty<DashboardTab>())
                 .Select(t => new
                 {
@@ -652,6 +666,32 @@ namespace MetabaseMigrator.Services
                 })
                 .ToList();
 
+            // ✅ Dashboard parameters (filters) with conditional fields
+            var parameters = new List<Dictionary<string, object>>();
+            foreach (var p in sourceDashboard.Parameters ?? new List<DashboardParameter>())
+            {
+                var param = new Dictionary<string, object>
+                {
+                    ["id"] = !string.IsNullOrWhiteSpace(p.Id) ? p.Id : Guid.NewGuid().ToString("N"),
+                    ["type"] = !string.IsNullOrWhiteSpace(p.Type) ? p.Type : "category",
+                    ["name"] = p.Name ?? "",
+                    ["slug"] = p.Slug ?? "",
+                    ["sectionId"] = p.SectionId ?? ""
+                };
+
+                if (p.IsMultiSelect.HasValue)
+                    param["isMultiSelect"] = p.IsMultiSelect.Value;
+
+                if (!string.IsNullOrWhiteSpace(p.ValuesSourceType))
+                    param["values_source_type"] = p.ValuesSourceType;
+
+                if (p.ValuesSourceConfig != null)
+                    param["values_source_config"] = p.ValuesSourceConfig;
+
+                parameters.Add(param);
+            }
+
+            // ✅ Final payload
             return new
             {
                 name = sourceDashboard.Name,
@@ -659,9 +699,10 @@ namespace MetabaseMigrator.Services
                 collection_id = targetCollectionId,
                 tabs = tabs,
                 dashcards = flattened,
-                parameters = sourceDashboard.Parameters ?? []
+                parameters = parameters
             };
         }
+
 
         private async Task<JsonElement> UpdateDashboardWithPayloadAsync(int targetDashboardId, object payload)
         {

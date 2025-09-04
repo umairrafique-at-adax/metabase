@@ -9,6 +9,7 @@ using System.Net.Http;
 using System.Text;
 using System.Xml.Linq;
 using Newtonsoft.Json.Linq;
+using MetabaseMigrator.Console.DTO;
 
 namespace MetabaseMigrator.Services
 {
@@ -203,7 +204,7 @@ namespace MetabaseMigrator.Services
             }
 
             System.Console.WriteLine($"\nFetching dashboard. Found {dashboardObject.Id}: {dashboardObject.Name}");
-            System.Console.WriteLine($"Fetching dependencies. Found {dashboardObject.Dashcards.Count}.");
+            System.Console.WriteLine($"Fetching dependencies. Found {dashboardObject.Dashcards.Where(c=>c.CardId != null).Count()}.");
 
 
             // Load all target cards ONCE to save API calls
@@ -364,7 +365,7 @@ namespace MetabaseMigrator.Services
                 }
 
                 // Migrate cards based on preview decisions
-                var cardMapping = new Dictionary<int, int>();
+               var cardMapping = new Dictionary<int, int>();
                 var sourceToTargetCollectionMap = new Dictionary<int, int>();
 
                 // Pre-populate with dashboard collection mapping if it exists
@@ -457,6 +458,8 @@ namespace MetabaseMigrator.Services
                 if (!newDashboardId.HasValue)
                     throw new InvalidOperationException("Failed to create/resolve target dashboard.");
 
+                if(newDashboardId == 0)
+                    throw new InvalidOperationException("Migration Failed. Exiting.");
                 //  Ensure tabs exist and get mapping (sourceTabId → targetTabId)
                 var srcToTargetTabMap = await EnsureTargetTabsAsync(newDashboardId.Value, dashboard, newCollectionId);
 
@@ -469,6 +472,7 @@ namespace MetabaseMigrator.Services
                 System.Console.ForegroundColor = ConsoleColor.Green;
                 System.Console.WriteLine($"\nMigration completed! New dashboard ID: {newDashboardId}");
                 System.Console.ResetColor();
+                _lastPreviewDashboard = null;
 
                 return newDashboardId;
             }
@@ -486,7 +490,7 @@ namespace MetabaseMigrator.Services
             {
                 var existing = await GetExistingDashboardIdAsync(sourceDashboard.Name);
                 System.Console.WriteLine($"Dashboard '{sourceDashboard.Name}' already exists in target (ID {existing})");
-                return existing;
+                return 0;
             }
 
             var createPayload = new
@@ -626,92 +630,169 @@ namespace MetabaseMigrator.Services
         //}
 
 
-        private object BuildDashboardUpdatePayload(
-            MetabaseDashboard sourceDashboard,
-            int? targetCollectionId,
-            Dictionary<int, int> cardMapping,
-            Dictionary<int, int> sourceToTargetTabMap)
-        {
-            // ✅ Flatten dashcards with mapped card + tab IDs
-            var flattened = (sourceDashboard.Dashcards ?? Enumerable.Empty<DashboardCard>())
-                .Where(dc => dc?.Card != null && cardMapping.ContainsKey(dc.Card.Id))
-                .Select(dc => new
+        private DashboardUpdatePayloadDto BuildDashboardUpdatePayload(
+        MetabaseDashboard sourceDashboard,
+        int? targetCollectionId,
+        Dictionary<int, int> cardMapping,
+        Dictionary<int, int> sourceToTargetTabMap)
+            {
+            // ✅ Flattened dashcards with correct mapping
+            var flattenedDashcards = (sourceDashboard.Dashcards ?? Enumerable.Empty<DashboardCard>())
+                .Select(dc =>
                 {
-                    id = dc.Id > 0 ? (int?)dc.Id : null,
-                    card_id = cardMapping[dc.Card.Id],
-                    dashboard_tab_id = (dc.DashboardTabId.HasValue &&
-                                        sourceToTargetTabMap.TryGetValue(dc.DashboardTabId.Value, out var tId))
-                                        ? (int?)tId : null,
-                    row = dc.Row,
-                    col = dc.Col,
-                    size_x = dc.SizeX,
-                    size_y = dc.SizeY,
+                    bool hasValidCard = dc?.Card != null && cardMapping.ContainsKey(dc.Card.Id);
 
-                    // ✅ filter only valid parameter mappings
-                    parameter_mappings = (sourceDashboard.Dashcards ?? new List<DashboardCard>())
-                    .Where(dc => dc?.Card != null && cardMapping.ContainsKey(dc.Card.Id))
-                    .SelectMany(dc => dc.ParameterMappings ?? new List<ParameterMapping>())
-                    .Where(pm => !string.IsNullOrWhiteSpace(pm.ParameterId) && pm.Target != null)
-                    .Select(pm => new
+                    return new DashboardCardPostDto
                     {
-                        parameter_id = pm.ParameterId,
-                        card_id = cardMapping[pm.CardId],
-                        target = pm.Target
-                    })
-                    .ToList(),
-                    visualization_settings = dc.VisualizationSettings ?? new Dictionary<string, object>()
+                        Id = dc.Id > 0 ? (int?)dc.Id : null,
+                        CardId = hasValidCard ? cardMapping[dc.Card.Id] : dc.CardId, // fallback for virtual cards
+                        DashboardTabId = (dc.DashboardTabId.HasValue &&
+                                          sourceToTargetTabMap.TryGetValue(dc.DashboardTabId.Value, out var mappedTabId))
+                                          ? mappedTabId : null,
+                        Row = dc.Row,
+                        Col = dc.Col,
+                        SizeX = dc.SizeX,
+                        SizeY = dc.SizeY,
+                        ParameterMappings = (dc.ParameterMappings ?? Enumerable.Empty<ParameterMapping>())
+                            .Where(pm => !string.IsNullOrWhiteSpace(pm.ParameterId) && pm.Target != null)
+                            .Select(pm => new ParameterMappingPostDto
+                            {
+                                ParameterId = pm.ParameterId,
+                                CardId = hasValidCard && cardMapping.ContainsKey(pm.CardId)
+                                    ? cardMapping[pm.CardId]
+                                    : pm.CardId,
+                                Target = pm.Target
+                            })
+                            .ToList(),
+                        VisualizationSettings = dc.VisualizationSettings ?? new Dictionary<string, object>()
+                    };
                 })
                 .ToList();
-
 
             // ✅ Tabs with resolved IDs
             var tabs = (sourceDashboard.Tabs ?? Enumerable.Empty<DashboardTab>())
-                .Select(t => new
+                .Select(t => new DashboardTabPostDto
                 {
-                    id = sourceToTargetTabMap.TryGetValue(t.Id, out var mappedId) ? mappedId : (int?)null,
-                    name = string.IsNullOrWhiteSpace(t.Name) ? "Untitled Tab" : t.Name,
-                    position = t.Position
+                    Id = sourceToTargetTabMap.TryGetValue(t.Id, out var mappedId) ? mappedId : (int?)null,
+                    Name = string.IsNullOrWhiteSpace(t.Name) ? "Untitled Tab" : t.Name,
+                    Position = t.Position
                 })
                 .ToList();
 
-            // ✅ Dashboard parameters (filters) with conditional fields
-            var parameters = new List<Dictionary<string, object>>();
-            foreach (var p in sourceDashboard.Parameters ?? new List<DashboardParameter>())
-            {
-                var param = new Dictionary<string, object>
+            // ✅ Parameters
+            var parameters = (sourceDashboard.Parameters ?? Enumerable.Empty<DashboardParameter>())
+                .Select(p => new DashboardParameterPostDto
                 {
-                    ["id"] = !string.IsNullOrWhiteSpace(p.Id) ? p.Id : Guid.NewGuid().ToString("N"),
-                    ["type"] = !string.IsNullOrWhiteSpace(p.Type) ? p.Type : "category",
-                    ["name"] = p.Name ?? "",
-                    ["slug"] = p.Slug ?? "",
-                    ["sectionId"] = p.SectionId ?? ""
-                };
+                    Id = !string.IsNullOrWhiteSpace(p.Id) ? p.Id : Guid.NewGuid().ToString("N"),
+                    Type = !string.IsNullOrWhiteSpace(p.Type) ? p.Type : "category",
+                    Name = p.Name ?? "",
+                    Slug = p.Slug ?? "",
+                    SectionId = p.SectionId ?? "",
+                    IsMultiSelect = p.IsMultiSelect,
+                    ValuesSourceType = p.ValuesSourceType,
+                    ValuesSourceConfig = p.ValuesSourceConfig != null
+                        ? HandleValuesSourceConfigMapping(p.ValuesSourceConfig, cardMapping)
+                        : null
+                })
+                .ToList();
 
-                if (p.IsMultiSelect.HasValue)
-                    param["isMultiSelect"] = p.IsMultiSelect.Value;
-
-                if (!string.IsNullOrWhiteSpace(p.ValuesSourceType))
-                    param["values_source_type"] = p.ValuesSourceType;
-
-                if (p.ValuesSourceConfig != null)
-                {
-                    var valuesSourceConfig = HandleValuesSourceConfigMapping(p.ValuesSourceConfig, cardMapping);
-                    param["values_source_config"] = valuesSourceConfig;
-                }
-                parameters.Add(param);
-            }
-
-            // ✅ Final payload
-            return new
+            // ✅ Final payload object
+            return new DashboardUpdatePayloadDto
             {
-                name = sourceDashboard.Name,
-                description = sourceDashboard.Description ?? "",
-                collection_id = targetCollectionId,
-                tabs = tabs,
-                dashcards = flattened,
-                parameters = parameters
+                Name = sourceDashboard.Name,
+                Description = sourceDashboard.Description ?? "",
+                CollectionId = targetCollectionId,
+                Tabs = tabs,
+                Dashcards = flattenedDashcards,
+                Parameters = parameters
             };
         }
+
+        //private object BuildDashboardUpdatePayload(
+        //    MetabaseDashboard sourceDashboard,
+        //    int? targetCollectionId,
+        //    Dictionary<int, int> cardMapping,
+        //    Dictionary<int, int> sourceToTargetTabMap)
+        //{
+        //    // ✅ Flatten dashcards with mapped card + tab IDs
+        //    var flattened = (sourceDashboard.Dashcards ?? Enumerable.Empty<DashboardCard>())
+        //        .Where(dc => dc?.Card != null && cardMapping.ContainsKey(dc.Card.Id))
+        //        .Select(dc => new
+        //        {
+        //            id = dc.Id > 0 ? (int?)dc.Id : null,
+        //            card_id = cardMapping[dc.Card.Id],
+        //            dashboard_tab_id = (dc.DashboardTabId.HasValue &&
+        //                                sourceToTargetTabMap.TryGetValue(dc.DashboardTabId.Value, out var tId))
+        //                                ? (int?)tId : null,
+        //            row = dc.Row,
+        //            col = dc.Col,
+        //            size_x = dc.SizeX,
+        //            size_y = dc.SizeY,
+        //            // ✅ filter only valid parameter mappings
+        //            parameter_mappings = (sourceDashboard.Dashcards ?? new List<DashboardCard>())
+        //            .Where(dc => dc?.Card != null && cardMapping.ContainsKey(dc.Card.Id))
+        //            .SelectMany(dc => dc.ParameterMappings ?? new List<ParameterMapping>())
+        //            .Where(pm => !string.IsNullOrWhiteSpace(pm.ParameterId) && pm.Target != null)
+        //            .Select(pm => new
+        //            {
+        //                parameter_id = pm.ParameterId,
+        //                card_id = cardMapping[pm.CardId],
+        //                target = pm.Target
+        //            })
+        //            .ToList(),
+        //            visualization_settings = dc.VisualizationSettings ?? new Dictionary<string, object>()
+        //        })
+        //        .ToList();
+
+
+        //    // ✅ Tabs with resolved IDs
+        //    var tabs = (sourceDashboard.Tabs ?? Enumerable.Empty<DashboardTab>())
+        //        .Select(t => new
+        //        {
+        //            id = sourceToTargetTabMap.TryGetValue(t.Id, out var mappedId) ? mappedId : (int?)null,
+        //            name = string.IsNullOrWhiteSpace(t.Name) ? "Untitled Tab" : t.Name,
+        //            position = t.Position
+        //        })
+        //        .ToList();
+
+        //    // ✅ Dashboard parameters (filters) with conditional fields
+        //    var parameters = new List<Dictionary<string, object>>();
+        //    foreach (var p in sourceDashboard.Parameters ?? new List<DashboardParameter>())
+        //    {
+        //        var param = new Dictionary<string, object>
+        //        {
+        //            ["id"] = !string.IsNullOrWhiteSpace(p.Id) ? p.Id : Guid.NewGuid().ToString("N"),
+        //            ["type"] = !string.IsNullOrWhiteSpace(p.Type) ? p.Type : "category",
+        //            ["name"] = p.Name ?? "",
+        //            ["slug"] = p.Slug ?? "",
+        //            ["sectionId"] = p.SectionId ?? ""
+        //        };
+
+        //        if (p.IsMultiSelect.HasValue)
+        //            param["isMultiSelect"] = p.IsMultiSelect.Value;
+
+        //        if (!string.IsNullOrWhiteSpace(p.ValuesSourceType))
+        //            param["values_source_type"] = p.ValuesSourceType;
+
+        //        if (p.ValuesSourceConfig != null)
+        //        {
+        //            var valuesSourceConfig = HandleValuesSourceConfigMapping(p.ValuesSourceConfig, cardMapping);
+        //            param["values_source_config"] = valuesSourceConfig;
+        //        }
+        //        parameters.Add(param);
+        //    }
+
+        //    // ✅ Final payload
+        //    return new
+        //    {
+        //        name = sourceDashboard.Name,
+        //        description = sourceDashboard.Description ?? "",
+        //        collection_id = targetCollectionId,
+        //        tabs = tabs,
+        //        dashcards = flattened,
+        //        parameters = parameters
+        //    };
+        //}
 
 
         // ✅ Helper method to handle card_id mapping in values_source_config
@@ -742,7 +823,7 @@ namespace MetabaseMigrator.Services
             return result;
         }
 
-        private async Task<JsonElement> UpdateDashboardWithPayloadAsync(int targetDashboardId, object payload)
+        private async Task<JsonElement> UpdateDashboardWithPayloadAsync(int targetDashboardId, DashboardUpdatePayloadDto payload)
         {
             return await _targetClient.UpdateDashboardAsync(targetDashboardId, payload, true);
         }

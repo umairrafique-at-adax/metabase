@@ -52,9 +52,19 @@ namespace MetabaseMigrator.Console.Services
         }
 
 
-        public async Task<JsonElement> UpdateDashboardAsync(int dashboardId, object payload)
+
+        public async Task<JsonElement> UpdateDashboardAsync(int dashboardId, object payload,bool model)
         {
-            var json = JsonSerializer.Serialize(payload);
+            string json;
+            if (model)
+            {
+                json = Newtonsoft.Json.JsonConvert.SerializeObject(payload);
+            }
+            else { 
+            
+                json = JsonSerializer.Serialize(payload);
+            }
+
             var responseStr = await PutAsync($"/api/dashboard/{dashboardId}", json);
 
             if (string.IsNullOrWhiteSpace(responseStr))

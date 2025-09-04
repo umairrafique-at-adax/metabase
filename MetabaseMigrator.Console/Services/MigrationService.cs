@@ -190,15 +190,15 @@ namespace MetabaseMigrator.Services
             {
                 var dashboard = await FindDashboardAsync(dashboardId);
                 dashboardObject = Newtonsoft.Json.JsonConvert.DeserializeObject<MetabaseDashboard>(dashboard?.ToString() ?? "");
-                
-               
+
+
 
                 if (dashboardObject == null)
                 {
                     PrintError("Dashboard not found or could not deserialize.");
                     return null;
                 }
-
+                var json = Newtonsoft.Json.JsonConvert.SerializeObject(dashboardObject);
                 _lastPreviewDashboard = dashboardObject;
             }
 
@@ -375,6 +375,10 @@ namespace MetabaseMigrator.Services
 
                 foreach (var dashCard in dashboard.Dashcards ?? new List<DashboardCard>())
                 {
+                    //Check if its a valid card(question)etc or just a heading/text
+                    if (dashCard.CardId == null) continue;
+
+
                     var card = dashCard.Card;
 
                     var fullCardJson = await _sourceClient.GetCardAsync(dashCard.Card.Id);
@@ -546,7 +550,7 @@ namespace MetabaseMigrator.Services
             dict["tabs"] = updatedTabs;
 
             // 5. Push full dashboard back to Metabase
-            await _targetClient.UpdateDashboardAsync(targetDashboardId, dict);
+            await _targetClient.UpdateDashboardAsync(targetDashboardId, dict, false);
 
             // 6. Re-fetch dashboard to resolve real IDs
             targetJson = await _targetClient.GetDashboardAsync(targetDashboardId);
@@ -642,15 +646,19 @@ namespace MetabaseMigrator.Services
                     col = dc.Col,
                     size_x = dc.SizeX,
                     size_y = dc.SizeY,
+
                     // ✅ filter only valid parameter mappings
-                    parameter_mappings = (dc.ParameterMappings ?? new List<ParameterMapping>())
-                        .Where(pm => !string.IsNullOrWhiteSpace(pm.ParameterId) && pm.Target != null)
-                        .Select(pm => new
-                        {
-                            parameter_id = pm.ParameterId,
-                            target = pm.Target
-                        })
-                        .ToList(),
+                    parameter_mappings = (sourceDashboard.Dashcards ?? new List<DashboardCard>())
+                    .Where(dc => dc?.Card != null && cardMapping.ContainsKey(dc.Card.Id))
+                    .SelectMany(dc => dc.ParameterMappings ?? new List<ParameterMapping>())
+                    .Where(pm => !string.IsNullOrWhiteSpace(pm.ParameterId) && pm.Target != null)
+                    .Select(pm => new
+                    {
+                        parameter_id = pm.ParameterId,
+                        card_id = cardMapping[pm.CardId],
+                        target = pm.Target
+                    })
+                    .ToList(),
                     visualization_settings = dc.VisualizationSettings ?? new Dictionary<string, object>()
                 })
                 .ToList();
@@ -686,8 +694,10 @@ namespace MetabaseMigrator.Services
                     param["values_source_type"] = p.ValuesSourceType;
 
                 if (p.ValuesSourceConfig != null)
-                    param["values_source_config"] = p.ValuesSourceConfig;
-
+                {
+                    var valuesSourceConfig = HandleValuesSourceConfigMapping(p.ValuesSourceConfig, cardMapping);
+                    param["values_source_config"] = valuesSourceConfig;
+                }
                 parameters.Add(param);
             }
 
@@ -704,9 +714,37 @@ namespace MetabaseMigrator.Services
         }
 
 
+        // ✅ Helper method to handle card_id mapping in values_source_config
+        private Dictionary<string, object> HandleValuesSourceConfigMapping(
+            ValuesSourceConfig sourceConfig,
+            Dictionary<int, int> cardMapping)
+        {
+            var result = new Dictionary<string, object>();
+
+            // ✅ Handle card_id mapping
+            if (cardMapping.TryGetValue(sourceConfig.CardId, out int targetCardId))
+            {
+                result["card_id"] = targetCardId;
+            }
+            else
+            {
+                // ✅ If no mapping found, keep original but you might want to log this
+                result["card_id"] = sourceConfig.CardId;
+                // Consider adding logging: Console.WriteLine($"Warning: No card mapping found for card_id {sourceConfig.CardId}");
+            }
+
+            // ✅ Copy value_field if present
+            if (sourceConfig.ValueField != null)
+            {
+                result["value_field"] = sourceConfig.ValueField;
+            }
+
+            return result;
+        }
+
         private async Task<JsonElement> UpdateDashboardWithPayloadAsync(int targetDashboardId, object payload)
         {
-            return await _targetClient.UpdateDashboardAsync(targetDashboardId, payload);
+            return await _targetClient.UpdateDashboardAsync(targetDashboardId, payload, true);
         }
 
 

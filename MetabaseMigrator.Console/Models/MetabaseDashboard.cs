@@ -9,6 +9,7 @@ namespace MetabaseMigrator.Console.Models
     using System;
     using System.Collections.Generic;
     using Newtonsoft.Json;
+    using Newtonsoft.Json.Linq;
 
     public class MetabaseDashboard
     {
@@ -109,7 +110,7 @@ namespace MetabaseMigrator.Console.Models
         public List<DashboardParameter> Parameters { get; set; }
 
         [JsonProperty("auto_apply_filters")]
-        public bool AutoApplyFilters { get; set; }
+        public bool? AutoApplyFilters { get; set; }
 
         [JsonProperty("created_at")]
         public DateTime CreatedAt { get; set; }
@@ -472,6 +473,7 @@ namespace MetabaseMigrator.Console.Models
 
         [JsonProperty("target")]
         public List<object> Target { get; set; }
+
     }
 
     public class DashboardTab

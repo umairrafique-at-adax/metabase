@@ -99,14 +99,17 @@ namespace MetabaseMigrator.Console.DTO
         [JsonProperty("sectionId")]
         public string SectionId { get; set; }
 
-        [JsonProperty("isMultiSelect")]
+        [JsonProperty("isMultiSelect", NullValueHandling = NullValueHandling.Ignore)]
         public bool? IsMultiSelect { get; set; }
 
-        [JsonProperty("values_source_type")]
-        public string ValuesSourceType { get; set; }
+        [JsonProperty("values_source_type", NullValueHandling = NullValueHandling.Ignore)]
+        public string? ValuesSourceType { get; set; }
 
-        [JsonProperty("values_source_config")]
-        public object ValuesSourceConfig { get; set; }
+        [JsonProperty("values_source_config", NullValueHandling = NullValueHandling.Ignore)]
+        public object? ValuesSourceConfig { get; set; }
+
+        [JsonProperty("temporal_units", NullValueHandling = NullValueHandling.Ignore)]
+        public List<string>? TemporalUnits { get; set; }
     }
 
 }

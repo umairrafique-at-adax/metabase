@@ -628,6 +628,10 @@ namespace MetabaseMigrator.Console.Models
         [JsonProperty("isMultiSelect")]
         public bool? IsMultiSelect { get; set; }
 
+        // ✅ Added for temporal-unit type
+        [JsonProperty("temporal_units")]
+        public List<string>? TemporalUnits { get; set; }
+
         [JsonProperty("values_source_type")]
         public string ValuesSourceType { get; set; }
 

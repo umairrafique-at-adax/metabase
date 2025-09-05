@@ -690,6 +690,7 @@ namespace MetabaseMigrator.Services
                     SectionId = p.SectionId ?? "",
                     IsMultiSelect = p.IsMultiSelect,
                     ValuesSourceType = p.ValuesSourceType,
+                    TemporalUnits = p.TemporalUnits,
                     ValuesSourceConfig = p.ValuesSourceConfig != null
                         ? HandleValuesSourceConfigMapping(p.ValuesSourceConfig, cardMapping)
                         : null

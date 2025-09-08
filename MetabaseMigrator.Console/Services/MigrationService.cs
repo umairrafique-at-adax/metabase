@@ -296,7 +296,7 @@ namespace MetabaseMigrator.Services
                 PrintError("Invalid ID");
                 return;
             }
-
+            _lastPreviewDashboard = null;
             await PreviewCopy(id);
 
         }
@@ -405,13 +405,15 @@ namespace MetabaseMigrator.Services
                                 // Update existing card
                                 var updatePayload = new
                                 {
-                                    name = card.Name,
-                                    description = card.Description ?? "",
-                                    dataset_query = card.DatasetQuery,
-                                    display = card.Display,
-                                    visualization_settings = card.VisualizationSettings,
+                                    name = fullCardJson.GetProperty("name").GetString() ?? "Untitled Card",
+                                    display = fullCardJson.GetProperty("display").GetString() ?? "table",
+                                    dataset_query = fullCardJson.TryGetProperty("dataset_query", out var dataq) ? dataq : JsonDocument.Parse("{}").RootElement,
+                                    visualization_settings = fullCardJson.TryGetProperty("visualization_settings", out var visuals) ? visuals : JsonDocument.Parse("{}").RootElement,
+                                    description = fullCardJson.TryGetProperty("description", out var descrip) && !string.IsNullOrWhiteSpace(descrip.GetString())
+                                ? descrip.GetString()
+                                : null,
                                     collection_id = cardCollectionId,
-                                    type = card.Type,
+                                    type = fullCardJson.TryGetProperty("type", out var typeProperty) ? typeProperty.GetString() : "question"
                                 };
 
                                 await UpdateCardAsync(card.ExistingTargetCardId.Value, updatePayload);
@@ -979,13 +981,14 @@ namespace MetabaseMigrator.Services
             };
         }
 
-
+        //using
         private async Task<JsonElement> CreateTargetCollectionAsync(object payload)
         {
             var response = await _targetClient.CreateCollectionAsync(payload);
             return response;
         }
 
+        //using
         private async Task<int?> FindTargetCollectionByNameAndParentAsync(string name, int? parentId, int? personalOwnerId)
         {
             try
@@ -1034,11 +1037,6 @@ namespace MetabaseMigrator.Services
         private async Task<JsonElement> GetSourceCollectionAsync(int collectionId)
         {
             var response = await _sourceClient.GetAsync($"/api/collection/{collectionId}");
-            return JsonSerializer.Deserialize<JsonElement>(response);
-        }
-        private async Task<JsonElement> CreateCollectionAsync(int collectionId)
-        {
-            var response = await _targetClient.GetAsync($"/api/collection/{collectionId}");
             return JsonSerializer.Deserialize<JsonElement>(response);
         }
 

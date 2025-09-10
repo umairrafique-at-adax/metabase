@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
 
@@ -26,6 +27,24 @@ namespace MetabaseMigrator.Console.DTO
 
         [JsonProperty("parameters")]
         public List<DashboardParameterPostDto> Parameters { get; set; }
+
+        [JsonPropertyName("param_fields")][JsonProperty("param_fields")]
+        public Dictionary<string, List<DashboardParamFieldPostDto>> ParamFields { get; set; }
+    }
+
+    public class DashboardParamFieldPostDto
+    {
+        [JsonPropertyName("semantic_type")][JsonProperty("semantic_type")] public string SemanticType { get; set; }
+        [JsonPropertyName("table_id")][JsonProperty("table_id")]  public int? TableId { get; set; }
+        [JsonPropertyName("name")] [JsonProperty("name")] public string Name { get; set; }
+        [JsonPropertyName("has_field_values")] [JsonProperty("has_field_values")] public string HasFieldValues { get; set; }
+        [JsonPropertyName("fk_target_field_id")] [JsonProperty("fk_target_field_id")] public int? FkTargetFieldId { get; set; }
+        [JsonPropertyName("dimensions")] [JsonProperty("dimensions")] public List<object> Dimensions { get; set; }
+        [JsonPropertyName("id")] [JsonProperty("id")] public int Id { get; set; }   // ✅ must be mapped
+        [JsonPropertyName("target")] [JsonProperty("target")] public object Target { get; set; }
+        [JsonPropertyName("display_name")] [JsonProperty("display_name")] public string DisplayName { get; set; }
+        [JsonPropertyName("name_field")] [JsonProperty("name_field")] public string NameField { get; set; }
+        [JsonPropertyName("base_type")] [JsonProperty("base_type")] public string BaseType { get; set; }
     }
 
     public class DashboardCardPostDto

@@ -91,6 +91,7 @@ namespace MetabaseMigrator.Console.Services
             return await SendRequestAsync(HttpMethod.Get, endpoint);
         }
 
+
         /// <summary>
         /// Post data to Metabase API
         /// </summary>
@@ -140,7 +141,26 @@ namespace MetabaseMigrator.Console.Services
         {
             var response = await GetAsync("/api/database");
             return JsonSerializer.Deserialize<JsonElement>(response);
+        }        
+        
+        
+        public async Task<JsonElement> GetDatabaseMetadataAsync(int id)
+        {
+            var response = await GetAsync($"/api/database/{id}/metadata");
+            return JsonSerializer.Deserialize<JsonElement>(response);
         }
+
+
+
+        /// <summary>
+        /// Get all cards
+        /// </summary>
+        public async Task<JsonElement> GetCardsAsync()
+        {
+            var response = await GetAsync("/api/card");
+            return JsonSerializer.Deserialize<JsonElement>(response);
+        }
+
 
         /// <summary>
         /// Get specific card by ID

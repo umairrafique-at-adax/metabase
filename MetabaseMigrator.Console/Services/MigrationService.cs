@@ -232,6 +232,15 @@ namespace MetabaseMigrator.Services
             {
                 if (dashCard.Card.Id > 0)
                 {
+                    if (dashCard.Card.DashboardId.HasValue && dashCard.Card.DashboardId.Value > 0)
+                    {
+                        dashCard.Card.MigrationAction = MigrationActions.New;
+                        System.Console.WriteLine(
+                            $"[Dashboard Card] Forcing 'New' → Card {dashCard.Card.Id} '{dashCard.Card.Name}' belongs to a dashboard."
+                        );
+                        continue; // Skip further duplicate check
+                    }
+
                     if (targetCards.TryGetValue(dashCard.Card.Name, out var existingId))
                     {
                         if (skipAll)
@@ -426,64 +435,76 @@ namespace MetabaseMigrator.Services
         }
 
         private async Task<JsonElement> RewriteDatasetQueryAsync(
-            JsonElement datasetQuery,
-            IdMappings mappings,
-            JsonElement sourceCard,
-            int? cardCollectionId)
+        JsonElement datasetQuery,
+        IdMappings mappings,
+        JsonElement sourceCard,
+        int? cardCollectionId)
         {
-            // Parse into mutable JsonNode
             var node = JsonNode.Parse(datasetQuery.GetRawText())!;
 
-            // Replace database id (if present)
-            if (node["database"] != null)
+            // Replace database id
+            if (node["database"] != null &&
+                int.TryParse(node["database"]!.ToString(), out var oldDb) &&
+                mappings.Databases.TryGetValue(oldDb, out var newDb))
             {
-                if (int.TryParse(node["database"]!.ToString(), out var oldDb) &&
-                    mappings.Databases.TryGetValue(oldDb, out var newDb))
-                {
-                    node["database"] = newDb;
-                }
+                node["database"] = newDb;
             }
 
-            // Replace source-table (number or "card__N")
-            if (node["query"]?["source-table"] != null)
+            // Figure out where the source-table lives
+            string[]? sourceTablePath =
+                node["query"]?["source-table"] != null
+                    ? new[] { "query", "source-table" }
+                    : node["query"]?["source-query"]?["source-table"] != null
+                        ? new[] { "query", "source-query", "source-table" }
+                        : null;
+
+            if (sourceTablePath != null)
             {
-                var sourceTableNode = node["query"]["source-table"];
-
-                if (sourceTableNode.GetValueKind() == JsonValueKind.Number)
+                JsonNode? parent = node;
+                for (int i = 0; i < sourceTablePath.Length - 1; i++)
                 {
-                    if (int.TryParse(sourceTableNode.ToString(), out var oldTable) &&
-                        mappings.Tables.TryGetValue(oldTable, out var newTable))
-                    {
-                        node["query"]["source-table"] = newTable;
-                    }
+                    parent = parent?[sourceTablePath[i]];
+                    if (parent == null) break;
                 }
-                else if (sourceTableNode.GetValueKind() == JsonValueKind.String)
+
+                if (parent != null)
                 {
-                    var s = sourceTableNode.ToString();
-                    if (s.StartsWith("card__", StringComparison.OrdinalIgnoreCase))
+                    string lastKey = sourceTablePath[^1];
+                    var sourceTableNode = parent[lastKey];
+
+                    if (sourceTableNode != null)
                     {
-                        var oldCardIdText = s.Substring("card__".Length);
-                        if (int.TryParse(oldCardIdText, out var oldCardId))
+                        if (sourceTableNode.GetValueKind() == JsonValueKind.Number &&
+                            int.TryParse(sourceTableNode.ToString(), out var oldTable) &&
+                            mappings.Tables.TryGetValue(oldTable, out var newTable))
                         {
-                            var fullCardJson = await _sourceClient.GetCardAsync(oldCardId);
+                            parent[lastKey] = newTable;
+                        }
+                        else if (sourceTableNode.GetValueKind() == JsonValueKind.String)
+                        {
+                            var s = sourceTableNode.ToString();
+                            if (s.StartsWith("card__", StringComparison.OrdinalIgnoreCase) &&
+                                int.TryParse(s.Substring("card__".Length), out var oldCardId))
+                            {
+                                var fullCardJson = await _sourceClient.GetCardAsync(oldCardId);
+                                var newCardId = await GetOrCreateCardMappingAsync(
+                                    fullCardJson, mappings, cardCollectionId, newDashboardId: null);
 
-                            // Create/match the referenced card in the target without dashboard linkage
-                            var newCardId = await GetOrCreateCardMappingAsync(fullCardJson, mappings, cardCollectionId, newDashboardId: null);
-
-                            node["query"]["source-table"] = $"card__{newCardId}";
+                                parent[lastKey] = $"card__{newCardId}";
+                            }
                         }
                     }
                 }
             }
 
-            // ❌ Remove internal Metabase identifiers
+            // Remove internal identifiers
             if (node["query"] is JsonObject queryObj)
             {
                 queryObj.Remove("aggregation-idents");
                 queryObj.Remove("breakout-idents");
             }
 
-            // Iteratively remap field IDs
+            // Iteratively walk the tree
             var stack = new Stack<JsonNode?>();
             stack.Push(node);
 
@@ -492,29 +513,56 @@ namespace MetabaseMigrator.Services
                 var cur = stack.Pop();
                 if (cur == null) continue;
 
-                if (cur is JsonArray arr)
+                if (cur is JsonArray arr && arr.Count > 0)
                 {
+                    // Normalize head (could be JsonValue, JsonElement, etc.)
+                    string? head = null;
+                    if (arr[0] is JsonValue jv && jv.TryGetValue<string>(out var s))
+                        head = s;
+                    else
+                        head = arr[0]?.ToString();
+
+                    // 🔍 Debug
+                    System.Console.WriteLine($"ARRAY HEAD: {head}");
+
                     // Handle ["field", <id>, {...}]
-                    if (arr.Count > 1 && arr[0]?.ToString() == "field")
+                    if (string.Equals(head, "field", StringComparison.OrdinalIgnoreCase))
                     {
-                        var identifierNode = arr[1];
-
-                        if (identifierNode is JsonValue idVal)
+                        if (arr.Count > 1 &&
+                            arr[1] is JsonValue idVal &&
+                            idVal.TryGetValue<int>(out var oldFieldId) &&
+                            mappings.Fields.TryGetValue(oldFieldId, out var newFieldId))
                         {
-                            if (idVal.TryGetValue<int>(out var oldFieldId))
-                            {
-                                if (mappings.Fields.TryGetValue(oldFieldId, out var newFieldId))
-                                {
-                                    arr[1] = newFieldId;
-                                }
-                            }
+                            arr[1] = JsonValue.Create(newFieldId);
+                            System.Console.WriteLine($"✔ Rewrote field {oldFieldId} → {newFieldId}");
                         }
+                        continue; // don’t traverse deeper into this array
+                    }
 
-                        // No need to recurse further into this ["field", ...] array
+                    // Handle ["metric", <id>]
+                    if (string.Equals(head, "metric", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (arr.Count > 1 &&
+                            arr[1] is JsonValue idVal &&
+                            idVal.TryGetValue<int>(out var oldMetricId))
+                        {
+                            int newMetricId;
+                            if (!mappings.Cards.TryGetValue(oldMetricId, out newMetricId))
+                            {
+                                var fullCardJson = await _sourceClient.GetCardAsync(oldMetricId);
+                                newMetricId = await GetOrCreateCardMappingAsync(
+                                    fullCardJson, mappings, cardCollectionId, newDashboardId: null);
+
+                                mappings.Cards[oldMetricId] = newMetricId;
+                            }
+
+                            arr[1] = JsonValue.Create(newMetricId);
+                            System.Console.WriteLine($"✔ Rewrote metric {oldMetricId} → {arr[1]}");
+                        }
                         continue;
                     }
 
-                    // Recurse into children
+                    // Not "field"/"metric": recurse into children
                     foreach (var item in arr)
                     {
                         if (item != null)
@@ -530,11 +578,10 @@ namespace MetabaseMigrator.Services
                     }
                 }
             }
-
-            // Convert back to JsonElement
             var json = node.ToJsonString();
             return JsonDocument.Parse(json).RootElement;
         }
+
 
 
         //removing this too
@@ -774,51 +821,101 @@ namespace MetabaseMigrator.Services
 
 
         public async Task<int> GetOrCreateCardMappingAsync(
-    JsonElement sourceCardJson,
-    IdMappings mappings,
-    int? cardCollectionId,
-    int? newDashboardId = null) // pass the target dashboard ID here
+            JsonElement sourceCardJson,
+            IdMappings mappings,
+            int? cardCollectionId,
+            int? newDashboardId = null)
         {
             int oldCardId = sourceCardJson.GetProperty("id").GetInt32();
 
-            // Already mapped? just return
-            if (mappings.Cards.TryGetValue(oldCardId, out int newCardId))
-                return newCardId;
+            // Check if card is dashboard-local (embedded directly in a dashboard)
+            bool isDashboardLocal = sourceCardJson.TryGetProperty("dashboard_id", out var dashIdProp) &&
+                                    dashIdProp.ValueKind == JsonValueKind.Number &&
+                                    dashIdProp.GetInt32() > 0;
 
-            // Build payload for new card
-            var newCardPayload = new
+            if (isDashboardLocal)
             {
-                name = sourceCardJson.GetProperty("name").GetString() ?? "Untitled Card",
-                display = sourceCardJson.GetProperty("display").GetString() ?? "table",
-                dataset_query = sourceCardJson.TryGetProperty("dataset_query", out var dq)
-                    ? await RewriteDatasetQueryAsync(dq, mappings, sourceCardJson, cardCollectionId)
-                    : JsonDocument.Parse("{}").RootElement,
-                visualization_settings = sourceCardJson.TryGetProperty("visualization_settings", out var vs)
-                    ? vs
-                    : JsonDocument.Parse("{}").RootElement,
-                description = sourceCardJson.TryGetProperty("description", out var desc) && !string.IsNullOrWhiteSpace(desc.GetString())
-                    ? desc.GetString()
-                    : null,
-                collection_id = cardCollectionId,
-                type = sourceCardJson.TryGetProperty("type", out var typeProp)
-                    ? typeProp.GetString()
-                    : "question"
-            };
+                // ✅ Always create a new card for dashboard-local case
+                var newCardPayload = new
+                {
+                    name = sourceCardJson.GetProperty("name").GetString() ?? "Untitled Card",
+                    display = sourceCardJson.GetProperty("display").GetString() ?? "table",
+                    dataset_query = sourceCardJson.TryGetProperty("dataset_query", out var dq)
+                        ? await RewriteDatasetQueryAsync(dq, mappings, sourceCardJson, cardCollectionId)
+                        : JsonDocument.Parse("{}").RootElement,
+                    visualization_settings = sourceCardJson.TryGetProperty("visualization_settings", out var vs)
+                        ? vs
+                        : JsonDocument.Parse("{}").RootElement,
+                    description = sourceCardJson.TryGetProperty("description", out var desc) &&
+                                  !string.IsNullOrWhiteSpace(desc.GetString())
+                        ? desc.GetString()
+                        : null,
+                    collection_id = cardCollectionId,
+                    type = sourceCardJson.TryGetProperty("type", out var typeProp)
+                        ? typeProp.GetString()
+                        : "question",
+                    dashboard_id = newDashboardId,
+                    dashboard = sourceCardJson.TryGetProperty("dashboard", out var dashboardProp)
+                                            ? new
+                                            {
+                                                name = dashboardProp.GetProperty("name").GetString(),
+                                                id = newDashboardId,
+                                                moderation_status = dashboardProp.TryGetProperty("moderation_status", out var modProp) && modProp.ValueKind != JsonValueKind.Null
+                                                  ? modProp.GetString()
+                                                  : null
+                                            }
+                                        : null
+                };
 
-            // Create card in target
-            var createdCard = await _targetClient.CreateCardAsync(newCardPayload);
-            newCardId = createdCard.GetProperty("id").GetInt32();
+                var newCard = await _targetClient.CreateCardAsync(newCardPayload);
+                int newCardId = newCard.GetProperty("id").GetInt32();
 
-            // Save mapping
-            mappings.Cards[oldCardId] = newCardId;
+                System.Console.WriteLine($"[Card Create] Dashboard-local card cloned: Source={oldCardId}, Target={newCardId}");
+                return newCardId;
+            }
+            else
+            {
+                // ✅ Global saved question / model
+                if (mappings.Cards.TryGetValue(oldCardId, out int mappedCardId))
+                {
+                    // Already mapped → reuse
+                    return mappedCardId;
+                }
 
-            return newCardId;
+                // Create once in target
+                var newCardPayload = new
+                {
+                    name = sourceCardJson.GetProperty("name").GetString() ?? "Untitled Card",
+                    display = sourceCardJson.GetProperty("display").GetString() ?? "table",
+                    dataset_query = sourceCardJson.TryGetProperty("dataset_query", out var dq)
+                        ? await RewriteDatasetQueryAsync(dq, mappings, sourceCardJson, cardCollectionId)
+                        : JsonDocument.Parse("{}").RootElement,
+                    visualization_settings = sourceCardJson.TryGetProperty("visualization_settings", out var vs)
+                        ? vs
+                        : JsonDocument.Parse("{}").RootElement,
+                    description = sourceCardJson.TryGetProperty("description", out var desc) &&
+                                  !string.IsNullOrWhiteSpace(desc.GetString())
+                        ? desc.GetString()
+                        : null,
+                    collection_id = cardCollectionId,
+                    type = sourceCardJson.TryGetProperty("type", out var typeProp)
+                        ? typeProp.GetString()
+                        : "question"
+                };
+
+                var createdCard = await _targetClient.CreateCardAsync(newCardPayload);
+                int newCardId = createdCard.GetProperty("id").GetInt32();
+
+                // Save mapping globally for reuse
+                mappings.Cards[oldCardId] = newCardId;
+
+                System.Console.WriteLine($"[Card Create] Global card created: Source={oldCardId}, Target={newCardId}");
+                return newCardId;
+            }
         }
-
 
         public async Task BuildCardMappingsAsync(IdMappings mappings)
         {
-            // Fetch raw JSON as JsonElement
             var sourceCardsJson = await _sourceClient.GetCardsAsync();
             var targetCardsJson = await _targetClient.GetCardsAsync();
 
@@ -839,7 +936,7 @@ namespace MetabaseMigrator.Services
                         foreach (var kv in obj.ToList())
                         {
                             if (kv.Key is "database" or "source-table")
-                                obj[kv.Key] = "X";
+                                obj[kv.Key] = "X"; // scrub IDs
                             else
                                 Walk(kv.Value);
                         }
@@ -849,7 +946,7 @@ namespace MetabaseMigrator.Services
                         for (int i = 0; i < arr.Count; i++)
                         {
                             if (arr[i] is JsonValue v && v.TryGetValue<int>(out _))
-                                arr[i] = "X";
+                                arr[i] = "X"; // scrub ints
                             else
                                 Walk(arr[i]);
                         }
@@ -862,7 +959,17 @@ namespace MetabaseMigrator.Services
 
             foreach (var sc in sourceCards)
             {
-                var scId = sc.GetProperty("id").GetInt32();
+                int scId = sc.GetProperty("id").GetInt32();
+
+                // ❌ Skip dashboard-local cards (they will be cloned per-dashboard later)
+                if (sc.TryGetProperty("dashboard_id", out var dashIdProp) &&
+                    dashIdProp.ValueKind == JsonValueKind.Number &&
+                    dashIdProp.GetInt32() > 0)
+                {
+                    System.Console.WriteLine($"[Skip Mapping] Dashboard-local card (Source Id={scId}) skipped.");
+                    continue;
+                }
+
                 var scName = sc.GetProperty("name").GetString();
                 var scDisplay = sc.TryGetProperty("display", out var disp) ? disp.GetString() : "";
                 var scType = sc.TryGetProperty("type", out var typ) ? typ.GetString() : "";
@@ -884,23 +991,100 @@ namespace MetabaseMigrator.Services
                 if (tc.ValueKind != JsonValueKind.Undefined)
                 {
                     mappings.Cards[scId] = tc.GetProperty("id").GetInt32();
-                    var bb = tc.GetProperty("id").GetInt32();
-                    System.Console.WriteLine(
-                        $"[Card Mapping] Match found for Source Card Id={scId}, Name='{scName}', Display='{scDisplay}', Type='{scType}, TC='{bb}'"
-                    );
+                    System.Console.WriteLine($"[Card Mapping] Global card mapped: Source={scId}, Target={mappings.Cards[scId]}");
                 }
                 else
                 {
-                    //System.Console.WriteLine(
-                    //    $"[Card Mapping] No match found for Source Card Id={scId}, Name='{scName}', Display='{scDisplay}', Type='{scType}'"
-                    //);
-                    
-                    System.Console.WriteLine(
-                        "___"
-                    );
+                    System.Console.WriteLine($"[Card Mapping] No match found for global Source={scId}, Name='{scName}'");
                 }
             }
         }
+
+        //public async Task BuildCardMappingsAsync(IdMappings mappings)
+        //{
+        //    // Fetch raw JSON as JsonElement
+        //    var sourceCardsJson = await _sourceClient.GetCardsAsync();
+        //    var targetCardsJson = await _targetClient.GetCardsAsync();
+
+        //    var sourceCards = sourceCardsJson.EnumerateArray().ToList();
+        //    var targetCards = targetCardsJson.EnumerateArray().ToList();
+
+        //    string NormalizeDatasetQuery(JsonElement dq)
+        //    {
+        //        if (dq.ValueKind == JsonValueKind.Undefined || dq.ValueKind == JsonValueKind.Null)
+        //            return "";
+
+        //        var node = JsonNode.Parse(dq.GetRawText())!;
+
+        //        void Walk(JsonNode? n)
+        //        {
+        //            if (n is JsonObject obj)
+        //            {
+        //                foreach (var kv in obj.ToList())
+        //                {
+        //                    if (kv.Key is "database" or "source-table")
+        //                        obj[kv.Key] = "X";
+        //                    else
+        //                        Walk(kv.Value);
+        //                }
+        //            }
+        //            else if (n is JsonArray arr)
+        //            {
+        //                for (int i = 0; i < arr.Count; i++)
+        //                {
+        //                    if (arr[i] is JsonValue v && v.TryGetValue<int>(out _))
+        //                        arr[i] = "X";
+        //                    else
+        //                        Walk(arr[i]);
+        //                }
+        //            }
+        //        }
+
+        //        Walk(node);
+        //        return node.ToJsonString();
+        //    }
+
+        //    foreach (var sc in sourceCards)
+        //    {
+        //        var scId = sc.GetProperty("id").GetInt32();
+        //        var scName = sc.GetProperty("name").GetString();
+        //        var scDisplay = sc.TryGetProperty("display", out var disp) ? disp.GetString() : "";
+        //        var scType = sc.TryGetProperty("type", out var typ) ? typ.GetString() : "";
+        //        var scQuery = sc.TryGetProperty("dataset_query", out var dq) ? NormalizeDatasetQuery(dq) : "";
+
+        //        var tc = targetCards.FirstOrDefault(t =>
+        //        {
+        //            var tName = t.GetProperty("name").GetString();
+        //            var tDisplay = t.TryGetProperty("display", out var d) ? d.GetString() : "";
+        //            var tType = t.TryGetProperty("type", out var tt) ? tt.GetString() : "";
+        //            var tQuery = t.TryGetProperty("dataset_query", out var tq) ? NormalizeDatasetQuery(tq) : "";
+
+        //            return string.Equals(tName, scName, StringComparison.OrdinalIgnoreCase)
+        //                   && string.Equals(tDisplay, scDisplay, StringComparison.OrdinalIgnoreCase)
+        //                   && string.Equals(tType, scType, StringComparison.OrdinalIgnoreCase)
+        //                   && tQuery == scQuery;
+        //        });
+
+        //        if (tc.ValueKind != JsonValueKind.Undefined)
+        //        {
+        //            mappings.Cards[scId] = tc.GetProperty("id").GetInt32();
+        //            var bb = tc.GetProperty("id").GetInt32();
+        //            System.Console.WriteLine(
+        //                $"[Card Mapping] Match found for Source Card Id={scId}, Name='{scName}', Display='{scDisplay}', Type='{scType}, TC='{bb}'"
+        //            );
+        //        }
+        //        else
+        //        {
+        //            //System.Console.WriteLine(
+        //            //    $"[Card Mapping] No match found for Source Card Id={scId}, Name='{scName}', Display='{scDisplay}', Type='{scType}'"
+        //            //);
+
+        //            System.Console.WriteLine(
+        //                "___"
+        //            );
+        //        }
+        //    }
+        //}
 
 
         public async Task<int?> PerformCopy(MetabaseDashboard dashboard)
@@ -988,6 +1172,7 @@ namespace MetabaseMigrator.Services
                             if (card.ExistingTargetCardId.HasValue)
                             {
                                 cardMapping[card.Id] = card.ExistingTargetCardId.Value;
+                                mappings.Cards[card.Id] = card.ExistingTargetCardId.Value;
                                 System.Console.WriteLine($"⚠ Skipped card '{card.Name}' (using existing ID: {card.ExistingTargetCardId})");
                             }
                             break;
@@ -1017,6 +1202,7 @@ namespace MetabaseMigrator.Services
 
                                 await UpdateCardAsync(card.ExistingTargetCardId.Value, updatePayload);
                                 cardMapping[card.Id] = card.ExistingTargetCardId.Value;
+                                mappings.Cards[card.Id] = card.ExistingTargetCardId.Value;
                                 System.Console.WriteLine($"Updated existing card '{card.Name}' (ID: {card.ExistingTargetCardId})");
                             }
                             break;
@@ -1026,13 +1212,17 @@ namespace MetabaseMigrator.Services
                             cardCollectionId = await ResolveCardCollectionAsync(card.CollectionId, sourceToTargetCollectionMap);
 
                             // Create new card
+                            System.Console.WriteLine("name:"+fullCardJson.GetProperty("name"));
+                            System.Console.WriteLine("id:" + fullCardJson.GetProperty("id"));
+                            System.Console.WriteLine(fullCardJson.TryGetProperty("dataset_query", out var dq)? fullCardJson.GetProperty("dataset_query"):"");
+
 
                             var newCardPayload = new
                             {
                                 name = fullCardJson.GetProperty("name").GetString() ?? "Untitled Card",
                                 display = fullCardJson.GetProperty("display").GetString() ?? "table",
                                 dataset_query = fullCardJson.TryGetProperty("dataset_query", out var dq)
-                                                ? await RewriteDatasetQueryAsync(dq, mappings,fullCardJson,cardCollectionId)
+                                                ? await RewriteDatasetQueryAsync(dq, mappings, fullCardJson, cardCollectionId)
                                                 : JsonDocument.Parse("{}").RootElement,
 
                                 visualization_settings = fullCardJson.TryGetProperty("visualization_settings", out var vs) ? vs : JsonDocument.Parse("{}").RootElement,
@@ -1069,12 +1259,12 @@ namespace MetabaseMigrator.Services
                 }
 
 
-                
+
                 //  Ensure tabs exist and get mapping (sourceTabId → targetTabId)
                 var srcToTargetTabMap = await EnsureTargetTabsAsync(newDashboardId.Value, dashboard, newCollectionId);
 
                 //  Build final payload including dashcards + tabs
-                var finalPayload = BuildDashboardUpdatePayload(dashboard, newCollectionId, cardMapping, srcToTargetTabMap, mappings);
+                var finalPayload = await BuildDashboardUpdatePayload(dashboard, newCollectionId, cardMapping, srcToTargetTabMap, mappings);
 
                 //  PUT update to dashboard
                 await UpdateDashboardWithPayloadAsync(newDashboardId.Value, finalPayload);
@@ -1314,30 +1504,42 @@ namespace MetabaseMigrator.Services
         //}
 
 
-        private Dictionary<string, object> HandleValuesSourceConfigMappingAsync(
+        private async Task<Dictionary<string, object>> HandleValuesSourceConfigMappingAsync(
             ValuesSourceConfig sourceConfig,
             Dictionary<int, int> cardMapping,
-            IdMappings mappings)
+            IdMappings mappings,
+            int? cardCollectionId)
         {
             var result = new Dictionary<string, object>();
 
             // ✅ Remap card_id
-            if (cardMapping.TryGetValue(sourceConfig.CardId, out int targetCardId))
-                result["card_id"] = targetCardId;
-            else
-                result["card_id"] = sourceConfig.CardId;
-
-            // ✅ Remap value_field if it’s a ["field", <id>, ...] structure
-            if (sourceConfig.ValueField != null &&
-                sourceConfig.ValueField.Count > 1 &&
-                sourceConfig.ValueField[0]?.ToString() == "field")
+            int sourceCardId = sourceConfig.CardId;
+            if (!cardMapping.TryGetValue(sourceCardId, out int targetCardId))
             {
-                int oldFieldId = Convert.ToInt32(sourceConfig.ValueField[1]);
-                if (mappings.Fields.TryGetValue(oldFieldId, out var newFieldId))
-                    sourceConfig.ValueField[1] = newFieldId;
+                var fullCardJson = await _sourceClient.GetCardAsync(sourceCardId);
+                targetCardId = await GetOrCreateCardMappingAsync(fullCardJson, mappings, cardCollectionId, newDashboardId: null);
+                cardMapping[sourceCardId] = targetCardId;
             }
 
-            result["value_field"] = sourceConfig.ValueField;
+            result["card_id"] = targetCardId;
+
+            // ✅ Remap value_field if it’s a ["field", <id>, ...] structure
+            if (sourceConfig.ValueField is List<object> valueField &&
+                valueField.Count > 1 &&
+                valueField[0]?.ToString() == "field")
+            {
+                if (int.TryParse(valueField[1]?.ToString(), out var oldFieldId) &&
+                    mappings.Fields.TryGetValue(oldFieldId, out var newFieldId))
+                {
+                    valueField[1] = newFieldId;
+                }
+
+                result["value_field"] = valueField;
+            }
+            else
+            {
+                result["value_field"] = sourceConfig.ValueField;
+            }
 
             return result;
         }
@@ -1374,7 +1576,7 @@ namespace MetabaseMigrator.Services
 
 
         //need to make this method async
-        private DashboardUpdatePayloadDto BuildDashboardUpdatePayload(
+        private async Task<DashboardUpdatePayloadDto> BuildDashboardUpdatePayload(
             MetabaseDashboard sourceDashboard,
             int? targetCollectionId,
             Dictionary<int, int> cardMapping,
@@ -1444,25 +1646,26 @@ namespace MetabaseMigrator.Services
             //    .ToList();
 
             var parameterTasks = (sourceDashboard.Parameters ?? Enumerable.Empty<DashboardParameter>())
-                .Select(async p => {
-                     var mappedConfig = p.ValuesSourceConfig != null
-                                 ? await HandleValuesSourceConfigMappingAsync(p.ValuesSourceConfig, cardMapping, mappings, targetCollectionId)
-                                 : null;
+                .Select(async p =>
+                {
+                    var mappedConfig = p.ValuesSourceConfig != null
+                                ? await HandleValuesSourceConfigMappingAsync(p.ValuesSourceConfig, cardMapping, mappings, targetCollectionId)
+                                : null;
 
-                     return new DashboardParameterPostDto
-                     {
-                         Id = !string.IsNullOrWhiteSpace(p.Id) ? p.Id : Guid.NewGuid().ToString("N"),
-                         Type = !string.IsNullOrWhiteSpace(p.Type) ? p.Type : "category",
-                         Name = p.Name ?? "",
-                         Slug = p.Slug ?? "",
-                         SectionId = p.SectionId ?? "",
-                         IsMultiSelect = p.IsMultiSelect,
-                         ValuesSourceType = p.ValuesSourceType,
-                         TemporalUnits = p.TemporalUnits,
-                         ValuesSourceConfig = mappedConfig
-                     };
+                    return new DashboardParameterPostDto
+                    {
+                        Id = !string.IsNullOrWhiteSpace(p.Id) ? p.Id : Guid.NewGuid().ToString("N"),
+                        Type = !string.IsNullOrWhiteSpace(p.Type) ? p.Type : "category",
+                        Name = p.Name ?? "",
+                        Slug = p.Slug ?? "",
+                        SectionId = p.SectionId ?? "",
+                        IsMultiSelect = p.IsMultiSelect,
+                        ValuesSourceType = p.ValuesSourceType,
+                        TemporalUnits = p.TemporalUnits,
+                        ValuesSourceConfig = mappedConfig
+                    };
 
-                 });
+                });
 
             var parameters = (await Task.WhenAll(parameterTasks)).ToList();
 

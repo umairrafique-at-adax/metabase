@@ -125,6 +125,9 @@ namespace MetabaseMigrator.Console.Services
             return JsonSerializer.Deserialize<JsonElement>(response);
         }
 
+
+        
+
         /// <summary>
         /// Get specific dashboard by ID
         /// </summary>
@@ -150,7 +153,25 @@ namespace MetabaseMigrator.Console.Services
             return JsonSerializer.Deserialize<JsonElement>(response);
         }
 
+        /// <summary>
+        /// Get specific segment by ID
+        /// </summary>
+        public async Task<JsonElement> GetSegmentAsync(int segmentId)
+        {
+            var response = await GetAsync($"/api/segment/{segmentId}");
+            return JsonSerializer.Deserialize<JsonElement>(response);
+        }
 
+
+        /// <summary>
+        /// Create a new segment
+        /// </summary>
+        public async Task<JsonElement> CreateSegmentAsync(object segmentData)
+        {
+            var json = JsonSerializer.Serialize(segmentData);
+            var response = await PostAsync("/api/segment", json);
+            return JsonSerializer.Deserialize<JsonElement>(response);
+        }
 
         /// <summary>
         /// Get all cards

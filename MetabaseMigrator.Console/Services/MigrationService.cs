@@ -368,6 +368,11 @@ namespace MetabaseMigrator.Services
             public Dictionary<int, int> Tables { get; set; } = new();
             public Dictionary<int, int> Fields { get; set; } = new();
             public Dictionary<int, int> Cards { get; set; } = new();
+            // Map old → new metric IDs
+            public Dictionary<int, int> Metrics { get; set; } = new();
+
+            // Map old → new segment IDs
+            public Dictionary<int, int> Segments { get; set; } = new();
         }
 
 
@@ -433,71 +438,57 @@ namespace MetabaseMigrator.Services
 
             return mappings;
         }
+         
+        static void TraverseAndModify(JToken token)
+        {
+            if (token.Type == JTokenType.Object)
+            {
+                foreach (var property in ((JObject)token).Properties())
+                {
+                    TraverseAndModify(property.Value);
+                }
+            }
+            else if (token.Type == JTokenType.Array)
+            {
+                foreach (var item in (JArray)token)
+                {
+                    TraverseAndModify(item);
+                }
+            }
+            else if (token.Type == JTokenType.String)
+            {
+                string value = token.ToString();
+                if (value.StartsWith("card__") && int.TryParse(value.Substring(6), out int num))
+                {
+                    //string newValue = "hero__" + value.Substring("card__".Length);
+                    //((JValue)token).Value = newValue;
+
+
+                }
+            }
+            // Other simple values (int, bool, etc.) are ignored
+        }
+
+        
 
         private async Task<JsonElement> RewriteDatasetQueryAsync(
-        JsonElement datasetQuery,
-        IdMappings mappings,
-        JsonElement sourceCard,
-        int? cardCollectionId)
+            JsonElement datasetQuery,
+            IdMappings mappings,
+            JsonElement sourceCard,
+            int? cardCollectionId)
         {
             var node = JsonNode.Parse(datasetQuery.GetRawText())!;
 
-            // Replace database id
+            // Replace database id (applies to both query + native)
             if (node["database"] != null &&
                 int.TryParse(node["database"]!.ToString(), out var oldDb) &&
                 mappings.Databases.TryGetValue(oldDb, out var newDb))
             {
                 node["database"] = newDb;
+                System.Console.WriteLine($"✔ Rewrote database {oldDb} → {newDb}");
             }
 
-            // Figure out where the source-table lives
-            string[]? sourceTablePath =
-                node["query"]?["source-table"] != null
-                    ? new[] { "query", "source-table" }
-                    : node["query"]?["source-query"]?["source-table"] != null
-                        ? new[] { "query", "source-query", "source-table" }
-                        : null;
-
-            if (sourceTablePath != null)
-            {
-                JsonNode? parent = node;
-                for (int i = 0; i < sourceTablePath.Length - 1; i++)
-                {
-                    parent = parent?[sourceTablePath[i]];
-                    if (parent == null) break;
-                }
-
-                if (parent != null)
-                {
-                    string lastKey = sourceTablePath[^1];
-                    var sourceTableNode = parent[lastKey];
-
-                    if (sourceTableNode != null)
-                    {
-                        if (sourceTableNode.GetValueKind() == JsonValueKind.Number &&
-                            int.TryParse(sourceTableNode.ToString(), out var oldTable) &&
-                            mappings.Tables.TryGetValue(oldTable, out var newTable))
-                        {
-                            parent[lastKey] = newTable;
-                        }
-                        else if (sourceTableNode.GetValueKind() == JsonValueKind.String)
-                        {
-                            var s = sourceTableNode.ToString();
-                            if (s.StartsWith("card__", StringComparison.OrdinalIgnoreCase) &&
-                                int.TryParse(s.Substring("card__".Length), out var oldCardId))
-                            {
-                                var fullCardJson = await _sourceClient.GetCardAsync(oldCardId);
-                                var newCardId = await GetOrCreateCardMappingAsync(
-                                    fullCardJson, mappings, cardCollectionId, newDashboardId: null);
-
-                                parent[lastKey] = $"card__{newCardId}";
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Remove internal identifiers
+            // Remove internal identifiers (query-builder specific)
             if (node["query"] is JsonObject queryObj)
             {
                 queryObj.Remove("aggregation-idents");
@@ -513,19 +504,55 @@ namespace MetabaseMigrator.Services
                 var cur = stack.Pop();
                 if (cur == null) continue;
 
-                if (cur is JsonArray arr && arr.Count > 0)
+                if (cur is JsonObject JObject)
                 {
-                    // Normalize head (could be JsonValue, JsonElement, etc.)
-                    string? head = null;
-                    if (arr[0] is JsonValue jv && jv.TryGetValue<string>(out var s))
-                        head = s;
-                    else
-                        head = arr[0]?.ToString();
+                    foreach (var kv in JObject.ToList())
+                    {
+                        if (kv.Value != null)
+                        {
+                            if (kv.Value is JsonArray || kv.Value is JsonObject)
+                            {
+                                stack.Push(kv.Value);
+                            }
+                            else {
+                                if (JObject[kv.Key]?.GetValueKind() == JsonValueKind.Number &&
+                                    int.TryParse(kv.Value!.ToString(), out var oldJoinTable) &&
+                                    mappings.Tables.TryGetValue(oldJoinTable, out var newJoinTable))
+                                {
+                                    JObject[kv.Key] = JsonValue.Create(newJoinTable);
+                                    System.Console.WriteLine($"✔ Rewrote join table {oldJoinTable} → {newJoinTable}");
+                                }
+                                else if (JObject[kv.Key]?.GetValueKind() == JsonValueKind.String)
+                                {
+                                    var s = JObject[kv.Key]!.ToString();
+                                    if (s.StartsWith("card__", StringComparison.OrdinalIgnoreCase) &&
+                                        int.TryParse(s.Substring("card__".Length), out var oldCardId))
+                                    {
+                                        var fullCardJson = await _sourceClient.GetCardAsync(oldCardId);
+                                        var newCardId = await GetOrCreateCardMappingAsync(
+                                            fullCardJson, mappings, cardCollectionId, newDashboardId: null);
 
-                    // 🔍 Debug
-                    System.Console.WriteLine($"ARRAY HEAD: {head}");
+                                        JObject[kv.Key] = JsonValue.Create($"card__{newCardId}");
+                                        System.Console.WriteLine($"✔ Rewrote join card {oldCardId} → card__{newCardId}");
+                                    }
+                                }
+                                
+                            }
+                        } 
+                            
+                    }
+                } 
+                else if (cur is JsonArray JArray && JArray.Count > 0)
+                {
+                    foreach (var item in JArray)
+                        if (item != null) stack.Push(item);
+                } 
+                /*
+                 if (cur is JsonArray arr && arr.Count > 0)
+                {
+                    string? head = arr[0]?.ToString();
 
-                    // Handle ["field", <id>, {...}]
+                    // ["field", <id>, {...}]
                     if (string.Equals(head, "field", StringComparison.OrdinalIgnoreCase))
                     {
                         if (arr.Count > 1 &&
@@ -536,52 +563,149 @@ namespace MetabaseMigrator.Services
                             arr[1] = JsonValue.Create(newFieldId);
                             System.Console.WriteLine($"✔ Rewrote field {oldFieldId} → {newFieldId}");
                         }
-                        continue; // don’t traverse deeper into this array
+                        continue; // don't recurse deeper
                     }
 
-                    // Handle ["metric", <id>]
+                    // ["metric", <id>]
                     if (string.Equals(head, "metric", StringComparison.OrdinalIgnoreCase))
                     {
                         if (arr.Count > 1 &&
                             arr[1] is JsonValue idVal &&
                             idVal.TryGetValue<int>(out var oldMetricId))
                         {
-                            int newMetricId;
-                            if (!mappings.Cards.TryGetValue(oldMetricId, out newMetricId))
+                            if (!mappings.Metrics.TryGetValue(oldMetricId, out var newMetricId))
                             {
-                                var fullCardJson = await _sourceClient.GetCardAsync(oldMetricId);
+                                var fullMetricJson = await _sourceClient.GetCardAsync(oldMetricId);
                                 newMetricId = await GetOrCreateCardMappingAsync(
-                                    fullCardJson, mappings, cardCollectionId, newDashboardId: null);
+                                    fullMetricJson, mappings, cardCollectionId);
 
-                                mappings.Cards[oldMetricId] = newMetricId;
+                                mappings.Metrics[oldMetricId] = newMetricId;
                             }
 
-                            arr[1] = JsonValue.Create(newMetricId);
+                            arr[1] = JsonValue.Create(mappings.Metrics[oldMetricId]);
                             System.Console.WriteLine($"✔ Rewrote metric {oldMetricId} → {arr[1]}");
                         }
                         continue;
                     }
 
-                    // Not "field"/"metric": recurse into children
-                    foreach (var item in arr)
+                    // ["segment", <id>]
+                    if (string.Equals(head, "segment", StringComparison.OrdinalIgnoreCase))
                     {
-                        if (item != null)
-                            stack.Push(item);
+                        if (arr.Count > 1 &&
+                            arr[1] is JsonValue idVal &&
+                            idVal.TryGetValue<int>(out var oldSegmentId))
+                        {
+                            if (!mappings.Segments.TryGetValue(oldSegmentId, out var newSegmentId))
+                            {
+                                var fullSegmentJson = await _sourceClient.GetSegmentAsync(oldSegmentId);
+                                newSegmentId = await GetOrCreateSegmentMappingAsync(
+                                    fullSegmentJson, mappings, cardCollectionId);
+
+                                mappings.Segments[oldSegmentId] = newSegmentId;
+                            }
+
+                            arr[1] = JsonValue.Create(mappings.Segments[oldSegmentId]);
+                            System.Console.WriteLine($"✔ Rewrote segment {oldSegmentId} → {arr[1]}");
+                        }
+                        continue;
                     }
+
+                    // ["expression", "name"] → skip
+                    if (string.Equals(head, "expression", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    // Recurse into array items
+                    foreach (var item in arr)
+                        if (item != null) stack.Push(item);
                 }
                 else if (cur is JsonObject obj)
                 {
+                    // Handle source-table inside joins
+                    if (obj.TryGetPropertyValue("joins", out var joinsNode) && joinsNode is JsonArray joinsArr)
+                   // if (cur.)
+                    {
+                        foreach (var join in joinsArr.OfType<JsonObject>())
+                        {
+                            if (join["source-table"] != null)
+                            {
+                                if (join["source-table"]?.GetValueKind() == JsonValueKind.Number &&
+                                    int.TryParse(join["source-table"]!.ToString(), out var oldJoinTable) &&
+                                    mappings.Tables.TryGetValue(oldJoinTable, out var newJoinTable))
+                                {
+                                    join["source-table"] = newJoinTable;
+                                    System.Console.WriteLine($"✔ Rewrote join table {oldJoinTable} → {newJoinTable}");
+                                }
+                                else if (join["source-table"]?.GetValueKind() == JsonValueKind.String)
+                                {
+                                    var s = join["source-table"]!.ToString();
+                                    if (s.StartsWith("card__", StringComparison.OrdinalIgnoreCase) &&
+                                        int.TryParse(s.Substring("card__".Length), out var oldCardId))
+                                    {
+                                        var fullCardJson = await _sourceClient.GetCardAsync(oldCardId);
+                                        var newCardId = await GetOrCreateCardMappingAsync(
+                                            fullCardJson, mappings, cardCollectionId, newDashboardId: null);
+
+                                        join["source-table"] = $"card__{newCardId}";
+                                        System.Console.WriteLine($"✔ Rewrote join card {oldCardId} → card__{newCardId}");
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Recurse deeper into objects
                     foreach (var kv in obj)
                     {
                         if (kv.Value != null)
                             stack.Push(kv.Value);
                     }
                 }
+            */
             }
+
             var json = node.ToJsonString();
             return JsonDocument.Parse(json).RootElement;
         }
 
+
+        public async Task<int> GetOrCreateSegmentMappingAsync(
+    JsonElement sourceSegmentJson,
+    IdMappings mappings,
+    int? collectionId)
+        {
+            int oldSegmentId = sourceSegmentJson.GetProperty("id").GetInt32();
+
+            // Reuse if already mapped
+            if (mappings.Segments.TryGetValue(oldSegmentId, out var mappedSegmentId))
+            {
+                return mappedSegmentId;
+            }
+
+            // Build new payload for the target
+            var newSegmentPayload = new
+            {
+                name = sourceSegmentJson.GetProperty("name").GetString() ?? "Untitled Segment",
+                description = sourceSegmentJson.TryGetProperty("description", out var descProp) &&
+                              descProp.ValueKind == JsonValueKind.String
+                                ? descProp.GetString()
+                                : null,
+                database_id = sourceSegmentJson.GetProperty("database_id").GetInt32(),
+                table_id = sourceSegmentJson.GetProperty("table_id").GetInt32(),
+                definition = sourceSegmentJson.GetProperty("definition"), // JSON structure of filters
+                collection_id = collectionId
+            };
+
+            var createdSegment = await _targetClient.CreateSegmentAsync(newSegmentPayload);
+            int newSegmentId = createdSegment.GetProperty("id").GetInt32();
+
+            // Save mapping for reuse
+            mappings.Segments[oldSegmentId] = newSegmentId;
+
+            System.Console.WriteLine($"[Segment Create] Source={oldSegmentId}, Target={newSegmentId}");
+            return newSegmentId;
+        }
 
 
         //removing this too
@@ -914,6 +1038,8 @@ namespace MetabaseMigrator.Services
             }
         }
 
+
+
         public async Task BuildCardMappingsAsync(IdMappings mappings)
         {
             var sourceCardsJson = await _sourceClient.GetCardsAsync();
@@ -922,6 +1048,7 @@ namespace MetabaseMigrator.Services
             var sourceCards = sourceCardsJson.EnumerateArray().ToList();
             var targetCards = targetCardsJson.EnumerateArray().ToList();
 
+            // Normalize only DB + table + card refs, not every int
             string NormalizeDatasetQuery(JsonElement dq)
             {
                 if (dq.ValueKind == JsonValueKind.Undefined || dq.ValueKind == JsonValueKind.Null)
@@ -936,20 +1063,25 @@ namespace MetabaseMigrator.Services
                         foreach (var kv in obj.ToList())
                         {
                             if (kv.Key is "database" or "source-table")
-                                obj[kv.Key] = "X"; // scrub IDs
+                                obj[kv.Key] = "X"; // scrub IDs only
                             else
                                 Walk(kv.Value);
                         }
                     }
                     else if (n is JsonArray arr)
                     {
-                        for (int i = 0; i < arr.Count; i++)
+                        // Only scrub known id positions (field/metric/segment/etc.)
+                        if (arr.Count > 1 && arr[0] is JsonValue hv)
                         {
-                            if (arr[i] is JsonValue v && v.TryGetValue<int>(out _))
-                                arr[i] = "X"; // scrub ints
-                            else
-                                Walk(arr[i]);
+                            var head = hv.ToString();
+                            if (head is "field" or "metric" or "segment")
+                            {
+                                arr[1] = "X"; // scrub ID
+                            }
                         }
+
+                        foreach (var item in arr)
+                            Walk(item);
                     }
                 }
 
@@ -961,44 +1093,146 @@ namespace MetabaseMigrator.Services
             {
                 int scId = sc.GetProperty("id").GetInt32();
 
-                // ❌ Skip dashboard-local cards (they will be cloned per-dashboard later)
-                if (sc.TryGetProperty("dashboard_id", out var dashIdProp) &&
-                    dashIdProp.ValueKind == JsonValueKind.Number &&
-                    dashIdProp.GetInt32() > 0)
-                {
-                    System.Console.WriteLine($"[Skip Mapping] Dashboard-local card (Source Id={scId}) skipped.");
-                    continue;
-                }
-
                 var scName = sc.GetProperty("name").GetString();
                 var scDisplay = sc.TryGetProperty("display", out var disp) ? disp.GetString() : "";
                 var scType = sc.TryGetProperty("type", out var typ) ? typ.GetString() : "";
                 var scQuery = sc.TryGetProperty("dataset_query", out var dq) ? NormalizeDatasetQuery(dq) : "";
 
+                if (scName == "Q_TotalFacilityLimit") {
+
+                    System.Console.WriteLine("here am i");
+                }
+
+                // ✅ No skipping: every card is considered
                 var tc = targetCards.FirstOrDefault(t =>
                 {
                     var tName = t.GetProperty("name").GetString();
                     var tDisplay = t.TryGetProperty("display", out var d) ? d.GetString() : "";
                     var tType = t.TryGetProperty("type", out var tt) ? tt.GetString() : "";
-                    var tQuery = t.TryGetProperty("dataset_query", out var tq) ? NormalizeDatasetQuery(tq) : "";
+                    //var tQuery = t.TryGetProperty("dataset_query", out var tq) ? NormalizeDatasetQuery(tq) : "";
 
                     return string.Equals(tName, scName, StringComparison.OrdinalIgnoreCase)
                            && string.Equals(tDisplay, scDisplay, StringComparison.OrdinalIgnoreCase)
-                           && string.Equals(tType, scType, StringComparison.OrdinalIgnoreCase)
-                           && tQuery == scQuery;
+                           && string.Equals(tType, scType, StringComparison.OrdinalIgnoreCase);
+                           //&& tQuery == scQuery;
                 });
 
                 if (tc.ValueKind != JsonValueKind.Undefined)
                 {
-                    mappings.Cards[scId] = tc.GetProperty("id").GetInt32();
-                    System.Console.WriteLine($"[Card Mapping] Global card mapped: Source={scId}, Target={mappings.Cards[scId]}");
+                    int tcId = tc.GetProperty("id").GetInt32();
+                    mappings.Cards[scId] = tcId;
+
+                    if (string.Equals(scType, "segment", StringComparison.OrdinalIgnoreCase))
+                    {
+                        mappings.Segments[scId] = tcId;
+                        System.Console.WriteLine($"[Segment Mapping] Segment mapped: Source={scId}, Target={tcId}");
+                    }
+                    else if (string.Equals(scType, "metric", StringComparison.OrdinalIgnoreCase))
+                    {
+                        mappings.Metrics[scId] = tcId;
+                        System.Console.WriteLine($"[Metric Mapping] Metric mapped: Source={scId}, Target={tcId}");
+                    }
+                    else
+                    {
+                       System.Console.WriteLine($"[Card Mapping] Card mapped: Source={scId}, Target={tcId}");
+                    }
                 }
                 else
                 {
-                    System.Console.WriteLine($"[Card Mapping] No match found for global Source={scId}, Name='{scName}'");
+                    System.Console.WriteLine($"[Card Mapping] No match found for Source={scId}, Name='{scName}'");
                 }
             }
         }
+
+
+
+
+        //not using this 15/9/2025
+        //public async Task BuildCardMappingsAsync(IdMappings mappings)
+        //{
+        //    var sourceCardsJson = await _sourceClient.GetCardsAsync();
+        //    var targetCardsJson = await _targetClient.GetCardsAsync();
+
+        //    var sourceCards = sourceCardsJson.EnumerateArray().ToList();
+        //    var targetCards = targetCardsJson.EnumerateArray().ToList();
+
+        //    string NormalizeDatasetQuery(JsonElement dq)
+        //    {
+        //        if (dq.ValueKind == JsonValueKind.Undefined || dq.ValueKind == JsonValueKind.Null)
+        //            return "";
+
+        //        var node = JsonNode.Parse(dq.GetRawText())!;
+
+        //        void Walk(JsonNode? n)
+        //        {
+        //            if (n is JsonObject obj)
+        //            {
+        //                foreach (var kv in obj.ToList())
+        //                {
+        //                    if (kv.Key is "database" or "source-table")
+        //                        obj[kv.Key] = "X"; // scrub IDs
+        //                    else
+        //                        Walk(kv.Value);
+        //                }
+        //            }
+        //            else if (n is JsonArray arr)
+        //            {
+        //                for (int i = 0; i < arr.Count; i++)
+        //                {
+        //                    if (arr[i] is JsonValue v && v.TryGetValue<int>(out _))
+        //                        arr[i] = "X"; // scrub ints
+        //                    else
+        //                        Walk(arr[i]);
+        //                }
+        //            }
+        //        }
+
+        //        Walk(node);
+        //        return node.ToJsonString();
+        //    }
+
+        //    foreach (var sc in sourceCards)
+        //    {
+        //        int scId = sc.GetProperty("id").GetInt32();
+
+        //        // ❌ Skip dashboard-local cards (they will be cloned per-dashboard later)
+        //        if (sc.TryGetProperty("dashboard_id", out var dashIdProp) &&
+        //            dashIdProp.ValueKind == JsonValueKind.Number &&
+        //            dashIdProp.GetInt32() > 0)
+        //        {
+        //            System.Console.WriteLine($"[Skip Mapping] Dashboard-local card (Source Id={scId}) skipped.");
+        //            continue;
+        //        }
+
+        //        var scName = sc.GetProperty("name").GetString();
+        //        var scDisplay = sc.TryGetProperty("display", out var disp) ? disp.GetString() : "";
+        //        var scType = sc.TryGetProperty("type", out var typ) ? typ.GetString() : "";
+        //        var scQuery = sc.TryGetProperty("dataset_query", out var dq) ? NormalizeDatasetQuery(dq) : "";
+
+        //        var tc = targetCards.FirstOrDefault(t =>
+        //        {
+        //            var tName = t.GetProperty("name").GetString();
+        //            var tDisplay = t.TryGetProperty("display", out var d) ? d.GetString() : "";
+        //            var tType = t.TryGetProperty("type", out var tt) ? tt.GetString() : "";
+        //            var tQuery = t.TryGetProperty("dataset_query", out var tq) ? NormalizeDatasetQuery(tq) : "";
+
+        //            return string.Equals(tName, scName, StringComparison.OrdinalIgnoreCase)
+        //                   && string.Equals(tDisplay, scDisplay, StringComparison.OrdinalIgnoreCase)
+        //                   && string.Equals(tType, scType, StringComparison.OrdinalIgnoreCase)
+        //                   && tQuery == scQuery;
+        //        });
+
+        //        if (tc.ValueKind != JsonValueKind.Undefined)
+        //        {
+        //            mappings.Cards[scId] = tc.GetProperty("id").GetInt32();
+        //            System.Console.WriteLine($"[Card Mapping] Global card mapped: Source={scId}, Target={mappings.Cards[scId]}");
+        //        }
+        //        else
+        //        {
+        //            System.Console.WriteLine($"[Card Mapping] No match found for global Source={scId}, Name='{scName}'");
+        //        }
+        //    }
+        //}
 
         //public async Task BuildCardMappingsAsync(IdMappings mappings)
         //{
@@ -1213,17 +1447,26 @@ namespace MetabaseMigrator.Services
 
                             // Create new card
                             System.Console.WriteLine("name:"+fullCardJson.GetProperty("name"));
+                            if (fullCardJson.GetProperty("name").ToString() == "Q_PercentOfBook")
+                            {
+                                System.Console.WriteLine("Found");
+
+                            }
                             System.Console.WriteLine("id:" + fullCardJson.GetProperty("id"));
                             System.Console.WriteLine(fullCardJson.TryGetProperty("dataset_query", out var dq)? fullCardJson.GetProperty("dataset_query"):"");
-
-
+                            JsonElement je = fullCardJson.TryGetProperty("dataset_query", out var dataquery)
+                                                ? await RewriteDatasetQueryAsync(dq, mappings, fullCardJson, cardCollectionId)
+                                                : JsonDocument.Parse("{}").RootElement;
+                            bool hasDashboard = true;
+                            if (fullCardJson.TryGetProperty("dashboard", out var dashboardProp))
+                            {
+                                hasDashboard = (dashboardProp.ValueKind == JsonValueKind.Undefined)?false:true;
+                            }
                             var newCardPayload = new
                             {
                                 name = fullCardJson.GetProperty("name").GetString() ?? "Untitled Card",
                                 display = fullCardJson.GetProperty("display").GetString() ?? "table",
-                                dataset_query = fullCardJson.TryGetProperty("dataset_query", out var dq)
-                                                ? await RewriteDatasetQueryAsync(dq, mappings, fullCardJson, cardCollectionId)
-                                                : JsonDocument.Parse("{}").RootElement,
+                                dataset_query = je,
 
                                 visualization_settings = fullCardJson.TryGetProperty("visualization_settings", out var vs) ? vs : JsonDocument.Parse("{}").RootElement,
                                 description = fullCardJson.TryGetProperty("description", out var desc) && !string.IsNullOrWhiteSpace(desc.GetString())
@@ -1231,8 +1474,8 @@ namespace MetabaseMigrator.Services
                                 : null,
                                 collection_id = cardCollectionId,
                                 type = fullCardJson.TryGetProperty("type", out var typeProp) ? typeProp.GetString() : "question",
-                                dashboard_id = newDashboardId,
-                                dashboard = fullCardJson.TryGetProperty("dashboard", out var dashboardProp)
+                                dashboard_id = (hasDashboard)?newDashboardId:null,
+                                dashboard = (hasDashboard)
                                             ? new
                                             {
                                                 name = dashboardProp.GetProperty("name").GetString(),

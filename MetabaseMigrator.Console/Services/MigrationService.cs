@@ -439,35 +439,6 @@ namespace MetabaseMigrator.Services
             return mappings;
         }
          
-        static void TraverseAndModify(JToken token)
-        {
-            if (token.Type == JTokenType.Object)
-            {
-                foreach (var property in ((JObject)token).Properties())
-                {
-                    TraverseAndModify(property.Value);
-                }
-            }
-            else if (token.Type == JTokenType.Array)
-            {
-                foreach (var item in (JArray)token)
-                {
-                    TraverseAndModify(item);
-                }
-            }
-            else if (token.Type == JTokenType.String)
-            {
-                string value = token.ToString();
-                if (value.StartsWith("card__") && int.TryParse(value.Substring(6), out int num))
-                {
-                    //string newValue = "hero__" + value.Substring("card__".Length);
-                    //((JValue)token).Value = newValue;
-
-
-                }
-            }
-            // Other simple values (int, bool, etc.) are ignored
-        }
 
         
 
@@ -535,6 +506,16 @@ namespace MetabaseMigrator.Services
                                         JObject[kv.Key] = JsonValue.Create($"card__{newCardId}");
                                         System.Console.WriteLine($"✔ Rewrote join card {oldCardId} → card__{newCardId}");
                                     }
+                                    else if (s.StartsWith("card:", StringComparison.OrdinalIgnoreCase) &&
+                                        int.TryParse(s.Substring("card:".Length), out var previousCardId))
+                                    {
+                                        var fullCardJson = await _sourceClient.GetCardAsync(previousCardId);
+                                        var newCardId = await GetOrCreateCardMappingAsync(
+                                            fullCardJson, mappings, cardCollectionId, newDashboardId: null);
+
+                                        JObject[kv.Key] = JsonValue.Create($"card:{newCardId}");
+                                        System.Console.WriteLine($"✔ Rewrote join card {previousCardId} → card:{newCardId}");
+                                    }
                                 }
                                 
                             }
@@ -544,6 +525,72 @@ namespace MetabaseMigrator.Services
                 } 
                 else if (cur is JsonArray JArray && JArray.Count > 0)
                 {
+
+                    string? head = JArray[0]?.ToString();
+
+                    // Handle ["field", <id>, {...}]
+                    if (string.Equals(head, "field", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (JArray.Count > 1 &&
+                            JArray[1] is JsonValue idVal &&
+                            idVal.TryGetValue<int>(out var oldFieldId) &&
+                            mappings.Fields.TryGetValue(oldFieldId, out var newFieldId))
+                        {
+                            JArray[1] = JsonValue.Create(newFieldId);
+                            System.Console.WriteLine($"✔ Rewrote field {oldFieldId} → {newFieldId}");
+                        }
+                        continue; // stop deeper traversal
+                    }
+
+                    // Handle ["metric", <id>]
+                    if (string.Equals(head, "metric", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (JArray.Count > 1 &&
+                            JArray[1] is JsonValue idVal &&
+                            idVal.TryGetValue<int>(out var oldMetricId))
+                        {
+                            if (!mappings.Metrics.TryGetValue(oldMetricId, out var newMetricId))
+                            {
+                                var fullMetricJson = await _sourceClient.GetCardAsync(oldMetricId);
+                                newMetricId = await GetOrCreateCardMappingAsync(fullMetricJson, mappings, cardCollectionId);
+                                mappings.Metrics[oldMetricId] = newMetricId;
+                            }
+
+                            JArray[1] = JsonValue.Create(mappings.Metrics[oldMetricId]);
+                            System.Console.WriteLine($"✔ Rewrote metric {oldMetricId} → {JArray[1]}");
+                        }
+                        continue;
+                    }
+
+                    // Handle ["segment", <id>]
+                    if (string.Equals(head, "segment", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (JArray.Count > 1 &&
+                            JArray[1] is JsonValue idVal &&
+                            idVal.TryGetValue<int>(out var oldSegmentId))
+                        {
+                            if (!mappings.Segments.TryGetValue(oldSegmentId, out var newSegmentId))
+                            {
+                                var fullSegmentJson = await _sourceClient.GetSegmentAsync(oldSegmentId);
+                                newSegmentId = await GetOrCreateSegmentMappingAsync(fullSegmentJson, mappings, cardCollectionId);
+                                mappings.Segments[oldSegmentId] = newSegmentId;
+                            }
+
+                            JArray[1] = JsonValue.Create(mappings.Segments[oldSegmentId]);
+                            System.Console.WriteLine($"✔ Rewrote segment {oldSegmentId} → {JArray[1]}");
+                        }
+                        continue;
+                    }
+
+                    // Skip ["expression", "name"]
+                    if (string.Equals(head, "expression", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+
+
+
                     foreach (var item in JArray)
                         if (item != null) stack.Push(item);
                 } 
@@ -1321,6 +1368,7 @@ namespace MetabaseMigrator.Services
         //}
 
 
+
         public async Task<int?> PerformCopy(MetabaseDashboard dashboard)
         {
             try
@@ -1457,11 +1505,12 @@ namespace MetabaseMigrator.Services
                             JsonElement je = fullCardJson.TryGetProperty("dataset_query", out var dataquery)
                                                 ? await RewriteDatasetQueryAsync(dq, mappings, fullCardJson, cardCollectionId)
                                                 : JsonDocument.Parse("{}").RootElement;
-                            bool hasDashboard = true;
+                            bool hasDashboard = false;
                             if (fullCardJson.TryGetProperty("dashboard", out var dashboardProp))
                             {
-                                hasDashboard = (dashboardProp.ValueKind == JsonValueKind.Undefined)?false:true;
+                                hasDashboard = (dashboardProp.ValueKind != JsonValueKind.Undefined && dashboardProp.ValueKind != JsonValueKind.Null) ? true:false;
                             }
+
                             var newCardPayload = new
                             {
                                 name = fullCardJson.GetProperty("name").GetString() ?? "Untitled Card",
@@ -1818,6 +1867,64 @@ namespace MetabaseMigrator.Services
         }
 
 
+        public async Task<Dictionary<string, object>> RewriteVisualizationSettingsAsync(
+            Dictionary<string, object> settings,
+            IdMappings mappings,
+            int? targetCollectionId)
+        {
+            // Defensive copy
+            var updated = new Dictionary<string, object>(settings);
+
+            if (updated.TryGetValue("visualization", out var vizObj) &&
+                vizObj is JObject vizObjAsJObject)
+            {
+                // Look for "columnValuesMapping"
+                var columnValuesMapping = vizObjAsJObject["columnValuesMapping"] as JObject;
+                if (columnValuesMapping != null)
+                {
+                    foreach (var col in columnValuesMapping.Properties())
+                    {
+                        var entriesArray = col.Value as JArray;
+                        if (entriesArray == null) continue;
+
+                        foreach (var entryToken in entriesArray.Children<JObject>())
+                        {
+                            var sourceId = entryToken["sourceId"]?.ToString();
+                            if (!string.IsNullOrEmpty(sourceId) && sourceId.StartsWith("card:", StringComparison.OrdinalIgnoreCase))
+                            {
+                                if (int.TryParse(sourceId.Substring("card:".Length), out var oldCardId))
+                                {
+                                    if (!mappings.Cards.TryGetValue(oldCardId, out var newCardId))
+                                    {
+                                        // Fetch and map card if not already mapped
+                                        var fullCardJson = await _sourceClient.GetCardAsync(oldCardId);
+                                        newCardId = await GetOrCreateCardMappingAsync(
+                                            fullCardJson, mappings, targetCollectionId, newDashboardId: null);
+
+                                        mappings.Cards[oldCardId] = newCardId;
+                                    }
+
+                                    // Replace in JObject directly
+                                    entryToken["sourceId"] = $"card:{mappings.Cards[oldCardId]}";
+                                    System.Console.WriteLine($"✔ Rewrote visualization card {oldCardId} → card:{mappings.Cards[oldCardId]}");
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Reattach visualization section
+                updated["visualization"] = vizObjAsJObject;
+            }
+
+            return updated;
+        }
+
+
+
+
+
+
         //need to make this method async
         private async Task<DashboardUpdatePayloadDto> BuildDashboardUpdatePayload(
             MetabaseDashboard sourceDashboard,
@@ -1827,38 +1934,47 @@ namespace MetabaseMigrator.Services
             IdMappings mappings)
         {
             // ✅ Flattened dashcards with correct mapping
-            var flattenedDashcards = (sourceDashboard.Dashcards ?? Enumerable.Empty<DashboardCard>())
-                .Select(dc =>
+            var flattenedDashcards = new List<DashboardCardPostDto>();
+
+
+
+            foreach (var dc in sourceDashboard.Dashcards ?? Enumerable.Empty<DashboardCard>())
+            {
+                bool hasValidCard = dc?.Card != null && cardMapping.ContainsKey(dc.Card.Id);
+
+                var dto = new DashboardCardPostDto
                 {
-                    bool hasValidCard = dc?.Card != null && cardMapping.ContainsKey(dc.Card.Id);
+                    Id = dc.Id > 0 ? (int?)dc.Id : null,
+                    CardId = hasValidCard ? cardMapping[dc.Card.Id] : (int?)null,
+                    DashboardTabId = (dc.DashboardTabId.HasValue &&
+                                      sourceToTargetTabMap.TryGetValue(dc.DashboardTabId.Value, out var mappedTabId))
+                                      ? mappedTabId : null,
+                    Row = dc.Row,
+                    Col = dc.Col,
+                    SizeX = dc.SizeX,
+                    SizeY = dc.SizeY,
+                    ParameterMappings = (dc.ParameterMappings ?? Enumerable.Empty<ParameterMapping>())
+                        .Where(pm => !string.IsNullOrWhiteSpace(pm.ParameterId) && pm.Target != null)
+                        .Select(pm => new ParameterMappingPostDto
+                        {
+                            ParameterId = pm.ParameterId,
+                            CardId = (hasValidCard && cardMapping.ContainsKey(pm.CardId))
+                                ? cardMapping[pm.CardId]
+                                : (int?)null,
+                            Target = RewriteParameterTarget(pm.Target, mappings)
+                        })
+                        .ToList(),
 
-                    return new DashboardCardPostDto
-                    {
-                        Id = dc.Id > 0 ? (int?)dc.Id : null,
-                        CardId = hasValidCard ? cardMapping[dc.Card.Id] : (int?)null, // ✅ don’t pass source ID if unmapped
-                        DashboardTabId = (dc.DashboardTabId.HasValue &&
-                                          sourceToTargetTabMap.TryGetValue(dc.DashboardTabId.Value, out var mappedTabId))
-                                          ? mappedTabId : null,
-                        Row = dc.Row,
-                        Col = dc.Col,
-                        SizeX = dc.SizeX,
-                        SizeY = dc.SizeY,
-                        ParameterMappings = (dc.ParameterMappings ?? Enumerable.Empty<ParameterMapping>())
-                            .Where(pm => !string.IsNullOrWhiteSpace(pm.ParameterId) && pm.Target != null)
-                            .Select(pm => new ParameterMappingPostDto
-                            {
-                                ParameterId = pm.ParameterId,
-                                CardId = (hasValidCard && cardMapping.ContainsKey(pm.CardId))
-                                    ? cardMapping[pm.CardId]
-                                    : (int?)null, // ✅ ensure no source card IDs slip through
-                                Target = RewriteParameterTarget(pm.Target, mappings)
-                            })
-                            .ToList(),
+                    VisualizationSettings = dc.VisualizationSettings != null
+                    ? await RewriteVisualizationSettingsAsync(
+                        dc.VisualizationSettings,
+                        mappings,
+                        targetCollectionId)
+                    : new Dictionary<string, object>()
+                };
 
-                        VisualizationSettings = dc.VisualizationSettings ?? new Dictionary<string, object>()
-                    };
-                })
-                .ToList();
+                flattenedDashcards.Add(dto);
+            }
 
             // ✅ Tabs with resolved IDs
             var tabs = (sourceDashboard.Tabs ?? Enumerable.Empty<DashboardTab>())

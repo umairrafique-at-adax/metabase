@@ -1721,43 +1721,41 @@ namespace MetabaseMigrator.Services
         //    return map;
         //}
 
-        private object RewriteParameterTarget(object target, IdMappings mappings)
+        public static JToken RewriteFieldsRecursive(JToken token, IdMappings mappings)
         {
-            if (target is JsonElement elem)
-            {
-                var node = JsonNode.Parse(elem.GetRawText())!;
-                RewriteFieldsRecursive(node, mappings);
-                return JsonDocument.Parse(node.ToJsonString()).RootElement;
-            }
-            else if (target is string s)
-            {
-                // Sometimes target is a string reference (rare), return as-is
-                return s;
-            }
+            if (token == null) return token;
 
-            return target;
-        }
-
-        private void RewriteFieldsRecursive(JsonNode? node, IdMappings mappings)
-        {
-            if (node is JsonArray arr && arr.Count > 0)
+            switch (token.Type)
             {
-                // Case: ["field", 123, {...}]
-                if (arr[0]?.ToString() == "field")
-                {
-                    int oldFieldId = arr[1]!.GetValue<int>();
-                    if (mappings.Fields.TryGetValue(oldFieldId, out var newFieldId))
-                        arr[1] = newFieldId;
-                }
+                case JTokenType.Array:
+                    var arr = (JArray)token;
 
-                // Recurse into array elements
-                foreach (var el in arr)
-                    RewriteFieldsRecursive(el, mappings);
-            }
-            else if (node is JsonObject obj)
-            {
-                foreach (var kv in obj)
-                    RewriteFieldsRecursive(kv.Value, mappings);
+                    // Special handling for ["field", …] arrays
+                    if (arr.Count > 1 && arr[0].Type == JTokenType.String && arr[0]!.ToString() == "field")
+                    {
+                        if (arr[1].Type == JTokenType.Integer &&
+                            mappings.Fields.TryGetValue(arr[1]!.Value<int>(), out var newId))
+                        {
+                            System.Console.WriteLine($"✔ Rewrote field {arr[1]} → {newId}");
+                            arr[1] = newId;
+                        }
+                        return arr; // don’t recurse inside ["field", …]
+                    }
+
+                    // Otherwise recurse into elements
+                    for (int i = 0; i < arr.Count; i++)
+                        arr[i] = RewriteFieldsRecursive(arr[i], mappings);
+
+                    return arr;
+
+                case JTokenType.Object:
+                    var obj = (JObject)token;
+                    foreach (var prop in obj.Properties().ToList())
+                        obj[prop.Name] = RewriteFieldsRecursive(obj[prop.Name], mappings);
+                    return obj;
+
+                default:
+                    return token; // scalars untouched
             }
         }
 
@@ -1957,11 +1955,14 @@ namespace MetabaseMigrator.Services
                         .Where(pm => !string.IsNullOrWhiteSpace(pm.ParameterId) && pm.Target != null)
                         .Select(pm => new ParameterMappingPostDto
                         {
+
+                            
+
                             ParameterId = pm.ParameterId,
                             CardId = (hasValidCard && cardMapping.ContainsKey(pm.CardId))
                                 ? cardMapping[pm.CardId]
                                 : (int?)null,
-                            Target = RewriteParameterTarget(pm.Target, mappings)
+                            Target = RewriteFieldsRecursive(JToken.FromObject(pm.Target), mappings)
                         })
                         .ToList(),
 

@@ -195,7 +195,7 @@ namespace MetabaseMigrator.Console.Services
         /// <summary>
         /// Get specific collection by ID
         /// </summary>
-        public async Task<JsonElement> GetCollectionAsync(int collectionId)
+        public async Task<JsonElement> GetCollectionAsync(object collectionId)
         {
             var response = await GetAsync($"/api/collection/{collectionId}");
             return JsonSerializer.Deserialize<JsonElement>(response);

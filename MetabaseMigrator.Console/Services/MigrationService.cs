@@ -373,6 +373,8 @@ namespace MetabaseMigrator.Services
 
             // Map old → new segment IDs
             public Dictionary<int, int> Segments { get; set; } = new();
+
+            public Dictionary<int,int>Collections { get; set; } = new();
         }
 
 
@@ -998,6 +1000,7 @@ namespace MetabaseMigrator.Services
             int? newDashboardId = null)
         {
             int oldCardId = sourceCardJson.GetProperty("id").GetInt32();
+            int oldCardCollectionId = sourceCardJson.GetProperty("collection_id").GetInt32();
 
             // Check if card is dashboard-local (embedded directly in a dashboard)
             bool isDashboardLocal = sourceCardJson.TryGetProperty("dashboard_id", out var dashIdProp) &&
@@ -1052,6 +1055,10 @@ namespace MetabaseMigrator.Services
                     // Already mapped → reuse
                     return mappedCardId;
                 }
+
+
+                cardCollectionId = await ResolveCardCollectionAsync(oldCardCollectionId, mappings.Collections);
+                mappings.Collections[oldCardCollectionId] = cardCollectionId.Value;
 
                 // Create once in target
                 var newCardPayload = new
@@ -1370,23 +1377,23 @@ namespace MetabaseMigrator.Services
 
 
         public async Task<int?> PerformCopy(MetabaseDashboard dashboard)
-        {
+         {
             try
             {
 
                 var mappings = await BuildMappingsAsync("ADAX Analytics Source");
 
-                System.Console.WriteLine("Database Mappings:");
-                foreach (var kvp in mappings.Databases)
-                    System.Console.WriteLine($"  {kvp.Key} -> {kvp.Value}");
+                //System.Console.WriteLine("Database Mappings:");
+                //foreach (var kvp in mappings.Databases)
+                //    System.Console.WriteLine($"  {kvp.Key} -> {kvp.Value}");
 
-                System.Console.WriteLine("Table Mappings:");
-                foreach (var kvp in mappings.Tables)
-                    System.Console.WriteLine($"  {kvp.Key} -> {kvp.Value}");
+                //System.Console.WriteLine("Table Mappings:");
+                //foreach (var kvp in mappings.Tables)
+                //    System.Console.WriteLine($"  {kvp.Key} -> {kvp.Value}");
 
-                System.Console.WriteLine("Field Mappings:");
-                foreach (var kvp in mappings.Fields)
-                    System.Console.WriteLine($"  {kvp.Key} -> {kvp.Value}");
+                //System.Console.WriteLine("Field Mappings:");
+                //foreach (var kvp in mappings.Fields)
+                //    System.Console.WriteLine($"  {kvp.Key} -> {kvp.Value}");
 
 
                 System.Console.WriteLine("Starting migration process...");
@@ -1397,7 +1404,7 @@ namespace MetabaseMigrator.Services
                 if (dashboard.CollectionId != null)
                 {
                     var collectionMapping = new Dictionary<int, int>();
-                    newCollectionId = await EnsureCollectionExistsAsync(dashboard.CollectionId.Value, collectionMapping);
+                    newCollectionId = await EnsureCollectionExistsAsync(dashboard.CollectionId.Value, mappings.Collections);
 
                     if (newCollectionId.HasValue)
                         System.Console.WriteLine($"Collection resolved to target ID {newCollectionId}");
@@ -1428,12 +1435,14 @@ namespace MetabaseMigrator.Services
 
                 // Migrate cards based on preview decisions
                 var cardMapping = new Dictionary<int, int>();
-                var sourceToTargetCollectionMap = new Dictionary<int, int>();
+                //var sourceToTargetCollectionMap = new Dictionary<int, int>();
 
                 // Pre-populate with dashboard collection mapping if it exists
                 if (dashboard.CollectionId.HasValue && newCollectionId.HasValue)
                 {
-                    sourceToTargetCollectionMap[dashboard.CollectionId.Value] = newCollectionId.Value;
+                    //sourceToTargetCollectionMap[dashboard.CollectionId.Value] = newCollectionId.Value;
+                    mappings.Collections[dashboard.CollectionId.Value] = newCollectionId.Value;
+                    
                 }
 
                 foreach (var dashCard in dashboard.Dashcards ?? new List<DashboardCard>())
@@ -1463,7 +1472,7 @@ namespace MetabaseMigrator.Services
                             if (card.ExistingTargetCardId.HasValue)
                             {
                                 // Resolve card's specific collection (might be different from dashboard collection)
-                                cardCollectionId = await ResolveCardCollectionAsync(card.CollectionId, sourceToTargetCollectionMap);
+                                cardCollectionId = await ResolveCardCollectionAsync(card.CollectionId, mappings.Collections);
 
                                 // Update existing card
                                 var updatePayload = new
@@ -1491,7 +1500,7 @@ namespace MetabaseMigrator.Services
 
                         case MigrationActions.New:
                             // Resolve card's specific collection (might be different from dashboard collection)
-                            cardCollectionId = await ResolveCardCollectionAsync(card.CollectionId, sourceToTargetCollectionMap);
+                            cardCollectionId = await ResolveCardCollectionAsync(card.CollectionId, mappings.Collections);
 
                             // Create new card
                             System.Console.WriteLine("name:"+fullCardJson.GetProperty("name"));
@@ -2226,11 +2235,11 @@ namespace MetabaseMigrator.Services
                 return null;
             }
 
-            // cached mapping?
-            if (sourceToTargetCollectionMap.TryGetValue(sourceCollectionId, out var cachedTargetId))
-                return cachedTargetId;
+            // fetching from already mapped collection
+            if (sourceToTargetCollectionMap.TryGetValue(sourceCollectionId, out var targetCollectionId))
+                return targetCollectionId;
 
-            // Fetch collection JSON from source
+            // Fetching collection JSON from source
             JsonElement sourceCollection;
             try
             {
@@ -2238,7 +2247,7 @@ namespace MetabaseMigrator.Services
             }
             catch (Exception ex)
             {
-                System.Console.WriteLine($"❌ Failed to fetch source collection {sourceCollectionId}: {ex.Message}");
+                System.Console.WriteLine($"Failed to fetch source collection {sourceCollectionId}: {ex.Message}");
                 return null;
             }
 
@@ -2279,7 +2288,7 @@ namespace MetabaseMigrator.Services
                 // if parent resolution failed, decide fallback behavior (we choose root fallback)
                 if (!targetParentId.HasValue)
                 {
-                    System.Console.WriteLine($"⚠ Parent collection {sourceParentId} could not be created/resolved. Using root as parent for '{name}'.");
+                    System.Console.WriteLine($"Parent collection {sourceParentId} could not be created/resolved. Using root as parent for '{name}'.");
                     targetParentId = null; // Use null for root
                 }
             }
@@ -2293,6 +2302,7 @@ namespace MetabaseMigrator.Services
             if (existingTargetId.HasValue)
             {
                 sourceToTargetCollectionMap[sourceCollectionId] = existingTargetId.Value;
+                
                 System.Console.WriteLine($"✓ Reusing existing target collection '{name}' (ID: {existingTargetId.Value}) under parent {targetParentId}");
                 return existingTargetId.Value;
             }
@@ -2307,7 +2317,7 @@ namespace MetabaseMigrator.Services
             //    parent_id = targetParentId
             //};
 
-            var targetCollectionLocation = targetParentId == null ? "/" : "/" + targetParentId + "/";
+            //var targetCollectionLocation = targetParentId == null ? "/" : "/" + targetParentId + "/";
 
             var payload = new
             {
@@ -2326,6 +2336,7 @@ namespace MetabaseMigrator.Services
                 var created = await CreateTargetCollectionAsync(payload);
                 var newId = GetCollectionId(created);
                 sourceToTargetCollectionMap[sourceCollectionId] = newId;
+                
                 System.Console.WriteLine($"Created collection '{name}' on target (ID: {newId}) with parent {targetParentId}");
                 return newId;
             }
@@ -2361,37 +2372,34 @@ namespace MetabaseMigrator.Services
         {
             try
             {
-                var collections = await _targetClient.GetAsync("/api/collection");
-                var collectionsJson = JsonSerializer.Deserialize<JsonElement>(collections);
+                var targetCollections = await _targetClient.GetAsync("/api/collection");
+                var collectionsJson = JsonSerializer.Deserialize<JsonElement>(targetCollections);
 
                 foreach (var collection in collectionsJson.EnumerateArray())
                 {
                     var collectionName = collection.GetProperty("name").GetString();
+                    object collectionId = collection.GetProperty("id");
 
-                    int? collectionPersonalOwnerId = null;
-                    if (collection.TryGetProperty("personal_owner_id", out var personalOwnerProp) && personalOwnerProp.ValueKind == JsonValueKind.Number)
-                    {
-                        collectionPersonalOwnerId = personalOwnerProp.GetInt32();
-                    }
-
-                    int? collectionParentId = null;
-                    if (collection.TryGetProperty("parent_id", out var parentProp) && parentProp.ValueKind == JsonValueKind.Number)
-                    {
-                        collectionParentId = parentProp.GetInt32();
-                    }
-
-                    // Match rule 1: Name 
+                    // matching collection by name
                     if (collectionName?.Equals(name, StringComparison.OrdinalIgnoreCase) == true)
                     {
-                        return collection.GetProperty("id").GetInt32();
+
+                        var collectionJson = await _targetClient.GetCollectionAsync(collectionId);
+
+                        int? collectionParentId = null;
+                        if (collectionJson.TryGetProperty("parent_id", out var parentProp) && parentProp.ValueKind == JsonValueKind.Number)
+                        {
+                            collectionParentId = parentProp.GetInt32();
+                        }
+
+                        //comparing their target parent ID's too for same names
+                        if (collectionParentId == parentId) { 
+                        
+                            return collection.GetProperty("id").GetInt32();
+                        }
+
                     }
 
-                    // Match rule 2: If name is not found then match their personal owner id
-                    if (personalOwnerId.HasValue && collectionPersonalOwnerId.HasValue &&
-                        personalOwnerId.Value == collectionPersonalOwnerId.Value)
-                    {
-                        return collection.GetProperty("id").GetInt32();
-                    }
                 }
 
                 return null;

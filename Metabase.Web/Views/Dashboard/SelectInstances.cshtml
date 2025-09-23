@@ -1,0 +1,45 @@
+﻿@{
+    var sources = ViewBag.Sources as List<Metabase.Web.Models.MetabaseInstance>;
+    var targets = ViewBag.Targets as List<Metabase.Web.Models.MetabaseInstance>;
+}
+
+<div class="container mt-5">
+    <div class="row justify-content-center">
+        <div class="col-md-6">
+            <div class="card shadow-sm border-0 rounded-3">
+                <div class="card-header bg-primary text-white">
+                    <h4 class="mb-0">Select Source and Target Instances</h4>
+                </div>
+                <div class="card-body">
+                    <form method="post" asp-action="SelectInstances" asp-controller="Dashboard">
+                        <div class="mb-3">
+                            <label for="sourceSelect" class="form-label">Source Instance</label>
+                            <select id="sourceSelect" name="sourceApiUrl" class="form-select">
+                                @foreach (var src in sources)
+                                {
+                                    <option value="@src.BaseUrl">@src.Name</option>
+                                }
+                            </select>
+                        </div>
+
+                        <div class="mb-3">
+                            <label for="targetSelect" class="form-label">Target Instance</label>
+                            <select id="targetSelect" name="targetApiUrl" class="form-select">
+                                @foreach (var tgt in targets)
+                                {
+                                    <option value="@tgt.BaseUrl">@tgt.Name</option>
+                                }
+                            </select>
+                        </div>
+
+                        <div class="d-grid">
+                            <button type="submit" class="btn btn-success">
+                                <i class="bi bi-arrow-right-circle"></i> Proceed
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>

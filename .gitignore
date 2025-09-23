@@ -5,6 +5,8 @@
 /ConsoleApp1/obj
 /MetabaseMigrator.Console/obj
 /MetabaseMigrator.Console/bin
+wwwroot/lib/
+wwwroot/dist/
 *.rsuser
 *.suo
 *.user

@@ -75,6 +75,9 @@ namespace MetabaseMigrator.Console.DTO
 
         [JsonProperty("visualization_settings")]
         public Dictionary<string, object> VisualizationSettings { get; set; }
+
+        [JsonProperty("inline_parameters")]
+        public List<string> InlineParameters { get; set; }
     }
 
     public class ParameterMappingPostDto

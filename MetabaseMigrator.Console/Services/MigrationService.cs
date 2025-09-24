@@ -1953,6 +1953,7 @@ namespace MetabaseMigrator.Services
                 {
                     Id = dc.Id > 0 ? (int?)dc.Id : null,
                     CardId = hasValidCard ? cardMapping[dc.Card.Id] : (int?)null,
+                    InlineParameters = dc.InlineParameters,
                     DashboardTabId = (dc.DashboardTabId.HasValue &&
                                       sourceToTargetTabMap.TryGetValue(dc.DashboardTabId.Value, out var mappedTabId))
                                       ? mappedTabId : null,

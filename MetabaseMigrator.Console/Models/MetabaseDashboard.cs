@@ -177,6 +177,9 @@ namespace MetabaseMigrator.Console.Models
 
         [JsonProperty("row")]
         public int Row { get; set; }
+
+        [JsonProperty("inline_parameters")]
+        public List<string> InlineParameters { get; set; } = new List<string>();
     }
 
     public class Card

@@ -1,9 +1,9 @@
 ﻿using System;
 using System.IO;
 using System.Threading.Tasks;
-using MetabaseMigrator.Console.Config;
-using MetabaseMigrator.Console.Services;
-using MetabaseMigrator.Services;
+using MetabaseMigrator.Core.Config;
+using MetabaseMigrator.Core.Services;
+//using MetabaseMigrator.Services;
 
 namespace MetabaseMigrator
 {
@@ -26,7 +26,7 @@ namespace MetabaseMigrator
                 var validation = config.Validate();
                 if (!validation.IsValid)
                 {
-                    System.Console.WriteLine("❌ Configuration validation failed:");
+                    System.Console.WriteLine("Configuration validation failed:");
                     System.Console.WriteLine(validation.GetErrorsAsString());
                     return 1;
                 }
@@ -125,31 +125,14 @@ namespace MetabaseMigrator
                         }
                     }
 
-
-
-                    //System.Console.Write("Enter dashboard name to migrate: ");
-                    //dashboardName = System.Console.ReadLine()?.Trim() ?? string.Empty;
                 }
 
-                //if (string.IsNullOrEmpty(dashboardName))
-                //{
-                //    logger.LogError("Dashboard name cannot be empty");
-                //    return 1;
-                //}
-
-                //// Execute migration
-                //logger.LogInfo($"Starting migration for dashboard: {dashboardName}");
-                //logger.LogInfo($"Source: {config.SourceUrl}");
-                //logger.LogInfo($"Target: {config.TargetUrl}");
-
-                //using var migrationService = new MigrationService(config, logger);
-                //var success = await migrationService.MigrateDashboardAsync(dashboardName);
                 var success = false;
                 return success ? 0 : 1;
             }
             catch (Exception ex)
             {
-                System.Console.WriteLine($"❌ Fatal error: {ex.Message}");
+                System.Console.WriteLine($"Fatal error: {ex.Message}");
                 System.Console.WriteLine($"Stack trace: {ex.StackTrace}");
                 return 1;
             }

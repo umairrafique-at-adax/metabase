@@ -1,0 +1,46 @@
+﻿@model Metabase.Web.Models.DashboardListViewModel
+
+<div class="container mt-4">
+    <h2 class="mb-4">Available Dashboards</h2>
+
+    <div class="row">
+        <!-- Source Dashboards -->
+        <div class="col-md-6">
+            <h4>Source Dashboards</h4>
+            <form asp-action="MigrateDashboard" method="post">
+                <div class="form-group mb-3">
+                    <label for="SourceDashboard">Select a Source Dashboard</label>
+                    <select class="form-control" id="SourceDashboard" name="sourceDashboardId" required>
+                        <option value="">-- Select --</option>
+                        @foreach (var dash in Model.SourceDashboards)
+                        {
+                            <option value="@dash.Id">@dash.Name</option>
+                        }
+                    </select>
+                </div>
+
+                <div class="d-flex gap-2">
+                    <button type="submit" name="mode" value="copy" class="btn btn-primary">
+                        Copy
+                    </button>
+                    <button type="submit" name="mode" value="drycopy" class="btn btn-secondary">
+                        Dry Copy
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Target Dashboards -->
+        <div class="col-md-6">
+            <h4>Target Dashboards</h4>
+            <ul class="list-group">
+                @foreach (var dash in Model.TargetDashboards)
+                {
+                    <li class="list-group-item">
+                        <strong>@dash.Name</strong> (ID: @dash.Id)
+                    </li>
+                }
+            </ul>
+        </div>
+    </div>
+</div>

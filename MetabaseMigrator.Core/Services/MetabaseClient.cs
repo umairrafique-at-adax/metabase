@@ -5,10 +5,10 @@ using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 using System.Xml.Linq;
-using MetabaseMigrator.Console.Config;
+using MetabaseMigrator.Core.Config;
 using RestSharp;
 
-namespace MetabaseMigrator.Console.Services
+namespace MetabaseMigrator.Core.Services
 {
     /// <summary>
     /// HTTP client wrapper for Metabase API operations

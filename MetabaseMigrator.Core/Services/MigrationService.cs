@@ -1,20 +1,19 @@
 ﻿using System.Text.Json;
-using MetabaseMigrator.Console.Config;
+using MetabaseMigrator.Core.Config;
 using System;
-using MetabaseMigrator.Console.Services;
+using MetabaseMigrator.Core.Services;
 using System.Text.Json.Serialization;
-using MetabaseMigrator.Console.Models;
+using MetabaseMigrator.Core.Models;
 using System.Runtime.Intrinsics.Arm;
 using System.Net.Http;
 using System.Text;
 using System.Xml.Linq;
 using Newtonsoft.Json.Linq;
-using MetabaseMigrator.Console.DTO;
-using static MetabaseMigrator.Services.MigrationService;
+using MetabaseMigrator.Core.DTO;
 using System.Text.Json.Nodes;
 using static System.Runtime.InteropServices.JavaScript.JSType;
 
-namespace MetabaseMigrator.Services
+namespace MetabaseMigrator.Core.Services
 {
     /// <summary>
     /// Main service for handling Metabase dashboard migrations
@@ -142,6 +141,18 @@ namespace MetabaseMigrator.Services
                 return null;
             }
         }
+
+        public async Task<List<MetabaseDashboard>> ListSourceDashboardsAsync() { 
+        
+            return await ListDashboardsInternal(_sourceClient);
+        }
+
+        public async Task<List<MetabaseDashboard>> ListTargetDashboardsAsync()
+        {
+
+            return await ListDashboardsInternal(_targetClient);
+        }
+
 
         private async Task<int?> ResolveCardCollectionAsync(int? cardCollectionId, Dictionary<int, int> sourceToTargetCollectionMap)
         {
@@ -2434,6 +2445,23 @@ namespace MetabaseMigrator.Services
                 _logger.LogError("Dashboard discovery failed", ex);
                 return null;
             }
+        }
+
+        private async Task<List<MetabaseDashboard>> ListDashboardsInternal(MetabaseClient client)
+        {
+            var dashboards = new List<MetabaseDashboard>();
+
+            var json = await client.GetDashboardsAsync();
+            foreach (var dash in json.EnumerateArray())
+            {
+                dashboards.Add(new MetabaseDashboard
+                {
+                    Id = dash.GetProperty("id").GetInt32(),
+                    Name = dash.GetProperty("name").GetString() ?? string.Empty
+                });
+            }
+
+            return dashboards;
         }
         private async Task<JsonElement?> ListDashboardInternal(MetabaseClient client)
         {

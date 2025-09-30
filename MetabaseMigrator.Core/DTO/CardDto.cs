@@ -6,7 +6,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
 
-namespace MetabaseMigrator.Console.DTO
+namespace MetabaseMigrator.Core.DTO
 {
     public class CardDto
     {

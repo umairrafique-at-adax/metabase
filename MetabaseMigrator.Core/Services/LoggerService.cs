@@ -1,8 +1,8 @@
 ﻿using System;
 using System.IO;
-using MetabaseMigrator.Console.Config;
+using MetabaseMigrator.Core.Config;
 
-namespace MetabaseMigrator.Console.Services
+namespace MetabaseMigrator.Core.Services
 {
     /// <summary>
     /// Logging levels for the application

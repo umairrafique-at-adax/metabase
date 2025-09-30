@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 
-namespace MetabaseMigrator.Console.Config
+namespace MetabaseMigrator.Core.Config
 {
     /// <summary>
     /// Manages loading and saving configuration from various sources

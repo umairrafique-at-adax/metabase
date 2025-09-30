@@ -19,6 +19,10 @@
 	</ItemGroup>
 
 	<ItemGroup>
+	  <ProjectReference Include="..\MetabaseMigrator.Core\MetabaseMigrator.Core.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
 		<None Update="appsettings.json">
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 		</None>
@@ -28,7 +32,9 @@
 	</ItemGroup>
 
 	<ItemGroup>
-	  <Folder Include="Config Files\" />
+	  <Reference Include="MetabaseMigrator.Core">
+	    <HintPath>..\MetabaseMigrator.Core\bin\Debug\net8.0\MetabaseMigrator.Core.dll</HintPath>
+	  </Reference>
 	</ItemGroup>
 
 </Project>

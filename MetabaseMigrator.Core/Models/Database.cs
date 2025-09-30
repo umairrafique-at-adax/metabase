@@ -5,7 +5,7 @@ using System.Text;
 using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 
-namespace MetabaseMigrator.Console.Models
+namespace MetabaseMigrator.Core.Models
 {
     public class Database
     {

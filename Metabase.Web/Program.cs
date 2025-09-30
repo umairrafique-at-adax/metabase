@@ -1,10 +1,14 @@
 using Metabase.Web.Models;
+using MetabaseMigrator.Core.Context;
+using MetabaseMigrator.Core.Interfaces;
+using MetabaseMigrator.Core.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.Configure<List<MetabaseInstance>>(
     builder.Configuration.GetSection("MetabaseInstances"));
-
+builder.Services.AddSingleton<IMigrationServiceFactory, MigrationServiceFactory>();
+builder.Services.AddSingleton<MigrationContext>();
 
 
 // Add services to the container.

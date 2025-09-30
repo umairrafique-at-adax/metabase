@@ -1,6 +1,6 @@
 ﻿using System.Text.Json.Serialization;
 
-namespace MetabaseMigrator.Console.Models
+namespace MetabaseMigrator.Core.Models
 {
     public class DatabaseMetadata
     {

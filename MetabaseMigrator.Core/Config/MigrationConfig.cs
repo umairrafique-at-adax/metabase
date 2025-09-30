@@ -1,6 +1,6 @@
 ﻿using System;
 
-namespace MetabaseMigrator.Console.Config
+namespace MetabaseMigrator.Core.Config
 {
     /// <summary>
     /// Main configuration class for Metabase migration

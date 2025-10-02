@@ -107,8 +107,16 @@ class Program
             }
         }
 
-        // --- Step 5: Write output ---
+        // Write output ---
         File.WriteAllText(outputPath, geoJson.ToString());
-        Console.WriteLine($"✅ Modified GeoJSON saved to {outputPath}");
+        Console.WriteLine($"Modified GeoJSON saved to {outputPath}");
+
+
+
+        string inputFile = "modifiedSuburbs.json";
+        string outputDir = "States";
+
+        SplitByState.Run(inputFile, outputDir);
+        Console.WriteLine($"Split Files saved to {outputPath}");
     }
 }

@@ -15,11 +15,11 @@ class Program
         string csvPath = "investmentsCsvFile.csv";         
         string outputPath = "modifiedSuburbs.json";
 
-        // --- Step 1: Read JSON ---
+        // Read JSON ---
         var jsonText = File.ReadAllText(jsonPath);
         var geoJson = JObject.Parse(jsonText);
 
-        // --- Step 2: Read CSV ---
+        // Read CSV ---
         var dealStates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         using (var reader = new StreamReader(csvPath))
@@ -61,7 +61,7 @@ class Program
             }
         }
 
-        // --- Step 3: State mapping (short form) ---
+        // State mapping (short form) ---
         var stateMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
             { "New South Wales", "NSW" },
@@ -74,7 +74,7 @@ class Program
             { "Australian Capital Territory", "ACT" }
         };
 
-        // --- Step 4: Modify JSON ---
+        // Modify JSON ---
         foreach (var feature in geoJson["features"]!)
         {
             var properties = feature["properties"] as JObject;

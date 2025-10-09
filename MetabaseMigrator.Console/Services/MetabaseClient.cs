@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
@@ -136,6 +137,20 @@ namespace MetabaseMigrator.Console.Services
             var response = await GetAsync($"/api/dashboard/{dashboardId}");
             return JsonSerializer.Deserialize<JsonElement>(response);
         }
+
+        public async Task<JsonElement> GetSettingsAsync(string key)
+        {
+            var response = await GetAsync($"/api/setting/{key}");
+            return JsonSerializer.Deserialize<JsonElement>(response);
+            
+        }
+        
+        public async Task<bool> GetSettingsAsync(string key, string json)
+        {
+            var response = await PutAsync($"/api/setting/{key}", json);
+            return true;
+        }
+
 
         /// <summary>
         /// Get all databases

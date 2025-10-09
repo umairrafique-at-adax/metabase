@@ -361,6 +361,20 @@ namespace MetabaseMigrator.Services
             }
         }
 
+        public async Task UPD() {
+            System.Console.WriteLine("Updating System Custom Map Settings...");
+            var settingJson = await _sourceClient.GetSettingsAsync("custom-geojson");
+
+            var updated = new
+            {
+                value = settingJson
+            };
+
+            string updatedJson = JsonSerializer.Serialize(updated);
+            var settingsUpdated = await _targetClient.GetSettingsAsync("custom-geojson", updatedJson);
+            System.Console.WriteLine("Custom Map Settings Updated.");
+        }
+
 
         public class IdMappings
         {
@@ -1382,6 +1396,9 @@ namespace MetabaseMigrator.Services
             {
 
                 var mappings = await BuildMappingsAsync("ADAX Analytics Source");
+
+                
+
 
                 //System.Console.WriteLine("Database Mappings:");
                 //foreach (var kvp in mappings.Databases)

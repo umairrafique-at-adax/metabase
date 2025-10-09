@@ -114,6 +114,10 @@ namespace MetabaseMigrator
                                 {
                                     await mgService.Copy();
                                 }
+                                break;   
+                            case "UPD":
+                                    await mgService.UPD();
+                                
                                 break;
 
                             case "EXIT":
@@ -169,6 +173,7 @@ namespace MetabaseMigrator
             System.Console.WriteLine("  LT       - List dashboards from Target");
             System.Console.WriteLine("  DRYCOPY  - Simulate dashboard migration (requires LS or LT first)");
             System.Console.WriteLine("  COPY     - Perform actual dashboard migration (requires LS or LT first)");
+            System.Console.WriteLine("  UPD      - Update custom map setting from source to target.");
             System.Console.WriteLine("  EXIT     - Exit the tool");
         }
         private static CommandLineOptions ParseArguments(string[] args)
